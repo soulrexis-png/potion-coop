@@ -47,9 +47,9 @@ public class GameChangedBanner : MonoBehaviour
         if (Time.unscaledTime > 120f) return;
         float w = 640, h = 90;
         GUI.Box(new Rect((Screen.width - w) / 2, 40, w, h),
-            "Общая аптека: игра обновилась, а мод собран под прошлую версию.\n" +
-            "Мод выключен, чтобы ничего не сломать. Играть можно как обычно.\n" +
-            "Дождись новой версии мода (github.com — страница PotionCoop).");
+            "Общая аптека: игра обновилась, а мод собран под прошлую версию. Мод выключен, играть можно как обычно.\n" +
+            "PotionCoop: the game was updated and the mod was built for the previous version. The mod is off; play as usual.\n" +
+            "Дождись новой версии мода / Wait for a new mod version: github.com/soulrexis-png/potion-coop");
     }
 }
 

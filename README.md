@@ -23,7 +23,7 @@ Play **A Place for Every Potion** together with friends over the internet, throu
 ## Install
 
 1. Download `PotionCoopSetup.exe` from [Releases](../../releases).
-2. Run it and press **1** (install / update). It finds the game in Steam by itself. The installer and the mod's texts are in Russian for now.
+2. Run it and press **1** (install / update). It finds the game in Steam by itself. The installer speaks English or Russian, following your Windows language.
 3. Start the game. The **first start takes a few minutes**: the mod loader (BepInEx) prepares itself and downloads the Unity libraries. Wait until the main menu appears.
 
 All players need the same game version and the same mod version. The mod checks the game version: after a game update it switches itself off and tells you so, until a new mod version is out.
@@ -75,7 +75,7 @@ Game settings (language, graphics, controls) and overall statistics always stay 
 
 ## Known limits
 
-- The installer is in Russian for now; in the game the mod speaks Russian or English, following the game's language.
+- The mod speaks English or Russian: the installer follows your Windows language, the game texts follow the game's language.
 - Opening a different pharmacy restarts the game.
 - Tested on game version 1.3.4.
 

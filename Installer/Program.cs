@@ -18,15 +18,19 @@ static class Program
     const string GameExe = "A Place for Every Potion.exe";
     const string ProcessName = "A Place for Every Potion";
 
+    // язык установщика — по языку Windows: русский для ru, иначе английский
+    static readonly bool Ru = System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName == "ru";
+    static string T(string ru, string en) => Ru ? ru : en;
+
     static int Main(string[] args)
     {
         Console.OutputEncoding = Encoding.UTF8;
-        Console.Title = "Общая аптека — установка";
+        Console.Title = T("Общая аптека — установка", "PotionCoop — setup");
         try { return Run(); }
         catch (Exception e)
         {
-            Red("\nЧто-то пошло не так:\n" + e.Message);
-            Console.WriteLine("\nСделай скриншот этого окна и приложи к сообщению о проблеме.");
+            Red(T("\nЧто-то пошло не так:\n", "\nSomething went wrong:\n") + e.Message);
+            Console.WriteLine(T("\nСделай скриншот этого окна и приложи к сообщению о проблеме.", "\nTake a screenshot of this window and attach it to your bug report."));
             Pause();
             return 1;
         }
@@ -34,34 +38,34 @@ static class Program
 
     static int Run()
     {
-        Title("ОБЩАЯ АПТЕКА — кооп-мод для A Place for Every Potion");
+        Title(T("ОБЩАЯ АПТЕКА — кооп-мод для A Place for Every Potion", "POTIONCOOP — co-op mod for A Place for Every Potion"));
 
         // 1. ищем игру
         string game = FindGame();
         if (game == null)
         {
-            Yellow("Не нашёл игру автоматически.");
-            Console.WriteLine("Открой Steam → правой кнопкой по игре → Управление → Просмотреть локальные файлы,");
-            Console.WriteLine("скопируй путь из адресной строки проводника и вставь сюда, потом нажми Enter:");
+            Yellow(T("Не нашёл игру автоматически.", "Couldn't find the game automatically."));
+            Console.WriteLine(T("Открой Steam → правой кнопкой по игре → Управление → Просмотреть локальные файлы,", "Open Steam → right-click the game → Manage → Browse local files,"));
+            Console.WriteLine(T("скопируй путь из адресной строки проводника и вставь сюда, потом нажми Enter:", "copy the path from the Explorer address bar, paste it here and press Enter:"));
             Console.Write("> ");
             game = (Console.ReadLine() ?? "").Trim().Trim('"');
-            if (!File.Exists(Path.Combine(game, GameExe))) { Red("В этой папке нет игры. Проверь путь."); Pause(); return 2; }
+            if (!File.Exists(Path.Combine(game, GameExe))) { Red(T("В этой папке нет игры. Проверь путь.", "The game is not in this folder. Check the path.")); Pause(); return 2; }
         }
-        Green("Игра найдена: " + game);
+        Green(T("Игра найдена: ", "Game found: ") + game);
 
         // 2. что уже стоит
         bool hasLoader = File.Exists(Path.Combine(game, "winhttp.dll")) && Directory.Exists(Path.Combine(game, "BepInEx", "core"));
         bool hasMod = File.Exists(Path.Combine(game, "BepInEx", "plugins", "PotionCoop.dll"));
         Console.WriteLine();
-        Console.WriteLine($"  Загрузчик модов: {(hasLoader ? "уже стоит" : "нет")}");
-        Console.WriteLine($"  Мод «Общая аптека»: {(hasMod ? "уже стоит" : "нет")}");
+        Console.WriteLine(T("  Загрузчик модов: ", "  Mod loader: ") + (hasLoader ? T("уже стоит", "installed") : T("нет", "not installed")));
+        Console.WriteLine(T("  Мод «Общая аптека»: ", "  PotionCoop mod: ") + (hasMod ? T("уже стоит", "installed") : T("нет", "not installed")));
         Console.WriteLine();
-        Console.WriteLine("  1 — Установить / обновить (по умолчанию)");
-        if (hasLoader || hasMod) Console.WriteLine("  2 — Удалить мод и загрузчик, вернуть игру как была");
+        Console.WriteLine(T("  1 — Установить / обновить (по умолчанию)", "  1 — Install / update (default)"));
+        if (hasLoader || hasMod) Console.WriteLine(T("  2 — Удалить мод и загрузчик, вернуть игру как была", "  2 — Remove the mod and the loader, restore the game as it was"));
         var backups = FindBackups();
-        if (backups.Count > 0) Console.WriteLine($"  3 — Вернуть личный сейв из копии (копий: {backups.Count})");
-        if (hasLoader) Console.WriteLine("  4 — Собрать логи (zip на рабочий стол)");
-        Console.Write("\nНажми Enter или введи номер: ");
+        if (backups.Count > 0) Console.WriteLine(T($"  3 — Вернуть личный сейв из копии (копий: {backups.Count})", $"  3 — Restore your solo save from a backup ({backups.Count} available)"));
+        if (hasLoader) Console.WriteLine(T("  4 — Собрать логи (zip на рабочий стол)", "  4 — Collect logs (zip on the Desktop)"));
+        Console.Write(T("\nНажми Enter или введи номер: ", "\nPress Enter or type a number: "));
         var choice = (Console.ReadLine() ?? "").Trim();
 
         if (choice == "4" && hasLoader) { CollectLogs(game); Pause(); return 0; }
@@ -79,7 +83,7 @@ static class Program
     static void Install(string game)
     {
         using var payload = Assembly.GetExecutingAssembly().GetManifestResourceStream("payload.zip")
-                            ?? throw new Exception("внутри установщика нет файлов мода (payload.zip)");
+                            ?? throw new Exception(T("внутри установщика нет файлов мода (payload.zip)", "the installer has no mod files inside (payload.zip)"));
         using var zip = new ZipArchive(payload, ZipArchiveMode.Read);
 
         var entries = zip.Entries.Where(e => !string.IsNullOrEmpty(e.Name)).ToList();
@@ -109,12 +113,12 @@ static class Program
         }
         Console.WriteLine();
         Console.WriteLine();
-        Green($"Готово! Новых файлов: {added}, обновлено: {updated}, без изменений: {same}.");
+        Green(T($"Готово! Новых файлов: {added}, обновлено: {updated}, без изменений: {same}.", $"Done! New files: {added}, updated: {updated}, unchanged: {same}."));
         CheckGameVersion(game, zip);
         Console.WriteLine();
-        Console.WriteLine("Теперь просто запускай игру из Steam.");
-        Console.WriteLine("При запуске появится чёрное окно консоли — это загрузчик модов, так и должно быть, не закрывай его.");
-        Console.WriteLine("В главном меню появятся кнопки «Создать общую аптеку» и «Зайти в аптеку …».");
+        Console.WriteLine(T("Теперь просто запускай игру из Steam. Первый запуск займёт несколько минут.", "Now just start the game from Steam. The first start takes a few minutes."));
+        Console.WriteLine(T("При запуске появится чёрное окно консоли — это загрузчик модов, так и должно быть, не закрывай его.", "A black console window opens together with the game — that is the mod loader, leave it open."));
+        Console.WriteLine(T("В главном меню появится кнопка «Общие аптеки». В лаборатории зажми T и выбери «Письмо» — там все клавиши.", "The main menu gets a \"Shared pharmacies\" button. In the lab hold T and pick \"Letter\" for all the keys."));
     }
 
     // Мод собран под конкретную версию игры. Если у друга игра другой версии — предупреждаем сразу
@@ -128,9 +132,9 @@ static class Program
             string have; using (var sha = SHA256.Create()) using (var f = File.OpenRead(Path.Combine(game, "GameAssembly.dll"))) have = Convert.ToHexString(sha.ComputeHash(f));
             if (want == have) return;
             Console.WriteLine();
-            Yellow("Внимание: у тебя игра другой версии, чем та, под которую собран мод.");
-            Console.WriteLine("Мод в игре сам выключится и покажет предупреждение — ничего не сломается.");
-            Console.WriteLine("Обновите игру в Steam у всех игроков; если мод отключился — дождитесь новой версии мода.");
+            Yellow(T("Внимание: у тебя игра другой версии, чем та, под которую собран мод.", "Note: your game version differs from the one the mod was built for."));
+            Console.WriteLine(T("Мод в игре сам выключится и покажет предупреждение — ничего не сломается.", "The mod will switch itself off in the game and show a warning — nothing will break."));
+            Console.WriteLine(T("Обновите игру в Steam у всех игроков; если мод отключился — дождитесь новой версии мода.", "Update the game in Steam for every player; if the mod switched off, wait for a new mod version."));
         }
         catch { }
     }
@@ -166,12 +170,12 @@ static class Program
                 src.CopyTo(dst); n++;
             }
         }
-        if (n == 0) { File.Delete(to); Yellow("Логов не нашёл — игру с модом ещё не запускали?"); return; }
+        if (n == 0) { File.Delete(to); Yellow(T("Логов не нашёл — игру с модом ещё не запускали?", "No logs found — has the game been started with the mod yet?")); return; }
         HandOver(to);
-        Green($"Готово! Логи собраны: {Path.GetFileName(to)} (на рабочем столе).");
-        Console.WriteLine("Файл уже скопирован — вставь его Ctrl+V туда, куда пишешь о проблеме.");
-        Console.WriteLine("Если не вставилось — перетащи файл из открывшейся папки в чат.");
-        Console.WriteLine("Важно: лог перезаписывается при запуске игры — собирай логи до того, как снова зайдёшь в игру.");
+        Green(T($"Готово! Логи собраны: {Path.GetFileName(to)} (на рабочем столе).", $"Done! Logs collected: {Path.GetFileName(to)} (on the Desktop)."));
+        Console.WriteLine(T("Файл уже скопирован — вставь его Ctrl+V туда, куда пишешь о проблеме.", "The file is already copied — paste it with Ctrl+V where you report the problem."));
+        Console.WriteLine(T("Если не вставилось — перетащи файл из открывшейся папки в чат.", "If it doesn't paste, drag the file from the opened folder."));
+        Console.WriteLine(T("Важно: лог перезаписывается при запуске игры — собирай логи до того, как снова зайдёшь в игру.", "Important: the log is overwritten when the game starts — collect logs before you start it again."));
     }
 
     static bool SameHash(string path, byte[] data)
@@ -195,7 +199,7 @@ static class Program
             var p = Path.Combine(game, d);
             if (Directory.Exists(p)) Directory.Delete(p, true);
         }
-        Green("Мод и загрузчик удалены. Игра снова как была. Сохранения не трогали.");
+        Green(T("Мод и загрузчик удалены. Игра снова как была. Сохранения не трогали.", "The mod and the loader are removed. The game is as it was. Saves were not touched."));
     }
 
     // ---------- копии личного сейва (их делает мод при каждом запуске игры) ----------
@@ -228,22 +232,22 @@ static class Program
     static void Restore(List<DirectoryInfo> backups)
     {
         Console.WriteLine();
-        Title("Какую копию вернуть? (сверху — самые свежие)");
+        Title(T("Какую копию вернуть? (сверху — самые свежие)", "Which backup to restore? (newest first)"));
         int n = Math.Min(backups.Count, 10);
         for (int i = 0; i < n; i++)
         {
             var d = backups[i];
             string when = DateTime.TryParseExact(d.Name.Substring(0, Math.Min(19, d.Name.Length)), "yyyy-MM-dd_HH-mm-ss", null,
                               System.Globalization.DateTimeStyles.None, out var t) ? t.ToString("dd.MM.yyyy HH:mm") : d.Name;
-            string note = d.Name.Contains("до-восстановления") ? "  (сейв перед прошлым восстановлением)" : "";
+            string note = d.Name.Contains("до-восстановления") ? T("  (сейв перед прошлым восстановлением)", "  (save from before the last restore)") : "";
             Console.WriteLine($"  {i + 1} — {when}{note}");
         }
-        Console.Write("\nВведи номер (Enter — отмена): ");
-        if (!int.TryParse((Console.ReadLine() ?? "").Trim(), out var k) || k < 1 || k > n) { Yellow("Отменил, ничего не трогал."); return; }
+        Console.Write(T("\nВведи номер (Enter — отмена): ", "\nType a number (Enter to cancel): "));
+        if (!int.TryParse((Console.ReadLine() ?? "").Trim(), out var k) || k < 1 || k > n) { Yellow(T("Отменил, ничего не трогал.", "Cancelled, nothing changed.")); return; }
 
         var src = backups[k - 1];
         var target = File.ReadAllText(Path.Combine(src.FullName, "_from.txt")).Trim();
-        if (string.IsNullOrEmpty(target)) { Red("В копии не записано, куда её возвращать."); return; }
+        if (string.IsNullOrEmpty(target)) { Red(T("В копии не записано, куда её возвращать.", "The backup doesn't say where it belongs.")); return; }
         Directory.CreateDirectory(target);
 
         // сначала прячем текущий сейв — вдруг передумаешь
@@ -262,9 +266,9 @@ static class Program
             File.Copy(f, Path.Combine(target, Path.GetFileName(f)), true);
             copied++;
         }
-        Green($"\nГотово! Вернул сейв из копии ({copied} файлов).");
-        Console.WriteLine("Сейв, который был до этого, тоже сохранил — он в списке с пометкой «перед прошлым восстановлением».");
-        Console.WriteLine("Если Steam при запуске спросит, какой сейв оставить, — выбирай тот, что на компьютере (локальный).");
+        Green(T($"\nГотово! Вернул сейв из копии ({copied} файлов).", $"\nDone! Save restored from the backup ({copied} files)."));
+        Console.WriteLine(T("Сейв, который был до этого, тоже сохранил — он в списке с пометкой «перед прошлым восстановлением».", "The save you had before is kept too — it is in the list as \"from before the last restore\"."));
+        Console.WriteLine(T("Если Steam при запуске спросит, какой сейв оставить, — выбирай тот, что на компьютере (локальный).", "If Steam asks which save to keep, choose the one on this computer (local)."));
     }
 
     // ---------- поиск игры через Steam ----------
@@ -312,7 +316,7 @@ static class Program
     {
         while (Process.GetProcessesByName(ProcessName).Length > 0)
         {
-            Yellow("\nИгра сейчас запущена — закрой её и нажми Enter.");
+            Yellow(T("\nИгра сейчас запущена — закрой её и нажми Enter.", "\nThe game is running — close it and press Enter."));
             Console.ReadLine();
         }
     }
@@ -328,5 +332,5 @@ static class Program
     static void Green(string t) { Console.ForegroundColor = ConsoleColor.Green; Console.WriteLine(t); Console.ResetColor(); }
     static void Yellow(string t) { Console.ForegroundColor = ConsoleColor.Yellow; Console.WriteLine(t); Console.ResetColor(); }
     static void Red(string t) { Console.ForegroundColor = ConsoleColor.Red; Console.WriteLine(t); Console.ResetColor(); }
-    static void Pause() { Console.WriteLine("\nНажми Enter, чтобы закрыть."); Console.ReadLine(); }
+    static void Pause() { Console.WriteLine(T("\nНажми Enter, чтобы закрыть.", "\nPress Enter to close.")); Console.ReadLine(); }
 }

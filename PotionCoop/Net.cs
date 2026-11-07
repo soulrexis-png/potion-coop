@@ -21,7 +21,7 @@ public class NetDriver : MonoBehaviour
     const int SendReliable = 8;     // k_nSteamNetworkingSend_Reliable
     const int SendUnreliable = 0;
     const byte MsgHello = 1, MsgHelloAck = 2, MsgPing = 3, MsgPong = 4, MsgState = 5, MsgRoom = 6, MsgSaveReq = 7, MsgSave = 8, MsgMove = 9, MsgEmote = 10, MsgMod = 11, MsgXp = 12, MsgXpTotal = 13, MsgSkills = 14, MsgSkillsSet = 15, MsgWorldSkills = 16, MsgSteals = 17, MsgScored = 18, MsgMark = 19, MsgColors = 20, MsgHook = 21;
-    const string Proto = "PotionCoop/0.0.27";
+    const string Proto = "PotionCoop/0.0.29";
     const float StateRate = 0.1f;   // 10 раз в секунду
     const float PeerTimeout = 20f;   // загрузка лаборатории может подвесить игру на 10+ секунд
 
@@ -346,6 +346,21 @@ public class NetDriver : MonoBehaviour
         for (int i = 0; i < n; i++)
         {
             var friend = SteamFriends.GetFriendByIndex(i, EFriendFlags.k_EFriendFlagImmediate);
+            // Друг стучится к нам, а мы его «в игре» не видим (Steam не показал статус) — всё равно принимаем:
+            // только друзья из списка, чужих не пускаем. Если запроса нет — вызов ничего не делает.
+            try
+            {
+                if (!_peers.ContainsKey(friend.m_SteamID) && SteamFriends.GetFriendPersonaState(friend) != EPersonaState.k_EPersonaStateOffline)
+                {
+                    var ident = new SteamNetworkingIdentity(); ident.SetSteamID64(friend.m_SteamID);
+                    if (SteamNetworkingMessages.AcceptSessionWithUser(ref ident))
+                    {
+                        Plugin.L.LogInfo($"NET: принял соединение от друга {Name(friend.m_SteamID)} (в игре его не видно)");
+                        Send(friend.m_SteamID, MsgHello, HelloBytes, SendReliable);
+                    }
+                }
+            }
+            catch (Exception e) { if (!_acceptWarned) { _acceptWarned = true; Plugin.L.LogWarning("NET accept: " + e.Message); } }
             if (!SteamFriends.GetFriendGamePlayed(friend, out FriendGameInfo_t info)) continue;
             if ((uint)(info.m_gameID.m_GameID & 0xFFFFFF) != _appId) continue;
             inGame++;
@@ -359,6 +374,7 @@ public class NetDriver : MonoBehaviour
         }
     }
 
+    bool _acceptWarned;
     void DropStalePeers()
     {
         foreach (var id in _peers.Keys.ToList())
@@ -371,7 +387,7 @@ public class NetDriver : MonoBehaviour
                 p.Avatar?.Destroy();
                 _peers.Remove(id);
                 RecolorAll();
-                if (Coop.Role == Role.Guest && Coop.HostId == id && !Coop.AutoJoin) HostGone($"{p.Name} пропал из сети");
+                if (Coop.Role == Role.Guest && Coop.HostId == id && !Coop.AutoJoin) HostGone(Loc.L($"{p.Name} пропал из сети", $"{p.Name} dropped out"));
             }
         }
     }
@@ -556,7 +572,7 @@ public class NetDriver : MonoBehaviour
     bool _roomPicker, _typingRoom; string _newRoomName = "";
     void BecomeHost()
     {
-        _newRoomName = "Аптека " + (Coop.ListRooms().Length + 1);
+        _newRoomName = Loc.L("Аптека ", "Pharmacy ") + (Coop.ListRooms().Length + 1);
         if (MenuButtons.Ok) { OpenCoopScreen(); return; }
         _roomPicker = true; _typingRoom = false; _guardFrame = Time.frameCount + 1;   // запасной путь — старое окно
     }
@@ -665,7 +681,7 @@ public class NetDriver : MonoBehaviour
     {
         Coop.Role = Role.Guest;
         Coop.HostId = hostId; Coop.HostName = _peers[hostId].Name;
-        _joinStatus = $"Получаю аптеку {Coop.HostName}…";
+        _joinStatus = Loc.L($"Получаю аптеку {Coop.HostName}…", $"Getting {Coop.HostName}'s pharmacy…");
         _joinRequestedAt = Time.unscaledTime;
         Send(hostId, MsgSaveReq, Array.Empty<byte>(), SendReliable);
         Plugin.L.LogInfo($"COOP: прошусь в аптеку {Coop.HostName}");
@@ -866,7 +882,7 @@ public class NetDriver : MonoBehaviour
         if (_dummy == null)
         {
             if (cam == null) return;
-            _dummy = new Avatar("Манекен");
+            _dummy = new Avatar(Loc.L("Манекен", "Dummy"));
             _dummy.SetColor(5);
             _dummyFollows = false;
             var fwd = cam.transform.forward; fwd.y = 0; fwd.Normalize();
@@ -1075,7 +1091,7 @@ public class NetDriver : MonoBehaviour
                     Plugin.L.LogInfo($"NET: {p.Name} перезапустил игру — начинаю с чистого листа");
                     try { Sync.DropAllHeldBy(p.Avatar, from, null); } catch { }
                     p.Avatar?.Destroy(); _peers.Remove(from);
-                    if (Coop.Role == Role.Guest && Coop.HostId == from && !Coop.AutoJoin) HostGone($"{p.Name} перезапустил игру");
+                    if (Coop.Role == Role.Guest && Coop.HostId == from && !Coop.AutoJoin) HostGone(Loc.L($"{p.Name} перезапустил игру", $"{p.Name} restarted the game"));
                     p = null;
                 }
                 bool isNew = p == null;
@@ -1179,7 +1195,7 @@ public class NetDriver : MonoBehaviour
                     }
                     else if (!p.Hosting) { p.RoomId = ""; p.RoomName = ""; }
                     if (was != p.Hosting) Plugin.L.LogInfo(p.Hosting ? $"COOP: {p.Name} открыл общую аптеку" : $"COOP: {p.Name} закрыл общую аптеку");
-                    if (was && !p.Hosting && Coop.Role == Role.Guest && Coop.HostId == from && !Coop.AutoJoin) HostGone($"{p.Name} вышел");
+                    if (was && !p.Hosting && Coop.Role == Role.Guest && Coop.HostId == from && !Coop.AutoJoin) HostGone(Loc.L($"{p.Name} вышел", $"{p.Name} left"));
                 }
                 break;
             case MsgSaveReq:
@@ -1196,11 +1212,11 @@ public class NetDriver : MonoBehaviour
                 try
                 {
                     Coop.UnpackToGuestDir(b, 1);
-                    _joinStatus = $"Перезапускаю игру, чтобы зайти в аптеку {Coop.HostName}…";
+                    _joinStatus = Loc.L($"Перезапускаю игру, чтобы зайти в аптеку {Coop.HostName}…", $"Restarting the game to join {Coop.HostName}'s pharmacy…");
                     Coop.Say(_joinStatus, 10f);
                     Coop.RelaunchAsGuest(from, Coop.HostName);
                 }
-                catch (Exception e) { _joinStatus = "Не удалось принять сейв: " + e.Message; Plugin.L.LogError("COOP: " + e); Coop.Role = Role.Solo; }
+                catch (Exception e) { _joinStatus = Loc.L("Не удалось принять сейв: ", "Couldn't receive the save: ") + e.Message; Plugin.L.LogError("COOP: " + e); Coop.Role = Role.Solo; }
                 break;
         }
     }
@@ -1296,9 +1312,9 @@ public class NetDriver : MonoBehaviour
             float k = Mathf.Min((Screen.width / 2f - m) / Mathf.Max(0.001f, Mathf.Abs(dir.x)), (Screen.height / 2f - m) / Mathf.Max(0.001f, Mathf.Abs(dir.y)));
             x = center.x + dir.x * k; y = center.y + dir.y * k;
             string arrow = Mathf.Abs(dir.x) > Mathf.Abs(dir.y) ? (dir.x > 0 ? "►" : "◄") : (dir.y > 0 ? "▼" : "▲");
-            label = $"{arrow}\n{av.Name} · {dist:0} м";
+            label = $"{arrow}\n{av.Name} · {dist:0} {Loc.L("м", "m")}";
         }
-        else label = $"▼\n{av.Name} · {dist:0} м";
+        else label = $"▼\n{av.Name} · {dist:0} {Loc.L("м", "m")}";
         float pulse = 1f + 0.15f * Mathf.Sin(a * 8f);
         float w = 220, h = 70 * pulse;
         GUI.color = new Color(1, 1, 1, fade);
@@ -1407,7 +1423,7 @@ public class NetDriver : MonoBehaviour
         if (_joinStatus != null)
         {
             if (Coop.Role == Role.Guest && Time.unscaledTime - _joinRequestedAt > 15f)
-            { _joinStatus = "Хост не ответил. Он точно открыл аптеку?"; Coop.Role = Role.Solo; }
+            { _joinStatus = Loc.L("Хост не ответил. Он точно открыл аптеку?", "The host didn't answer. Did they open a pharmacy?"); Coop.Role = Role.Solo; }
             GUI.Label(new Rect(x + 16, cy, w - 32, 44), _joinStatus, _hudStyle);
             cy += 54;
         }
