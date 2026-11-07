@@ -1,0 +1,50 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <AssemblyName>PotionCoop</AssemblyName>
+    <RootNamespace>PotionCoop</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <CheckEolTargetFramework>false</CheckEolTargetFramework>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+
+    <!-- Папка игры. Если игра стоит в другом месте — поменяй только эту строку -->
+    <GameDir>E:\SteamLibrary\steamapps\common\A Place for Every Potion</GameDir>
+    <Core>$(GameDir)\BepInEx\core</Core>
+    <Interop>$(GameDir)\BepInEx\interop</Interop>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="BepInEx.Core"><HintPath>$(Core)\BepInEx.Core.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="BepInEx.Unity.IL2CPP"><HintPath>$(Core)\BepInEx.Unity.IL2CPP.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="0Harmony"><HintPath>$(Core)\0Harmony.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Il2CppInterop.Runtime"><HintPath>$(Core)\Il2CppInterop.Runtime.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Il2CppInterop.Common"><HintPath>$(Core)\Il2CppInterop.Common.dll</HintPath><Private>false</Private></Reference>
+
+    <Reference Include="Il2Cppmscorlib"><HintPath>$(Interop)\Il2Cppmscorlib.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.CoreModule"><HintPath>$(Interop)\UnityEngine.CoreModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="R3"><HintPath>$(Interop)\R3.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="CodeBase"><HintPath>$(Interop)\CodeBase.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Common"><HintPath>$(Interop)\Common.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.IMGUIModule"><HintPath>$(Interop)\UnityEngine.IMGUIModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.TextRenderingModule"><HintPath>$(Interop)\UnityEngine.TextRenderingModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Unity.TextMeshPro"><HintPath>$(Interop)\Unity.TextMeshPro.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.UI"><HintPath>$(Interop)\UnityEngine.UI.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.UIModule"><HintPath>$(Interop)\UnityEngine.UIModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="VContainer"><HintPath>$(Interop)\VContainer.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="DOTween"><HintPath>$(Interop)\DOTween.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Unity.InputSystem"><HintPath>$(Interop)\Unity.InputSystem.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="com.rlabrecque.steamworks.net"><HintPath>$(Interop)\com.rlabrecque.steamworks.net.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+
+  <!-- После сборки сам кладёт мод в BepInEx\plugins -->
+  <Target Name="CopyToPlugins" AfterTargets="Build">
+    <MakeDir Directories="$(GameDir)\BepInEx\plugins" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(GameDir)\BepInEx\plugins" />
+    <Message Importance="high" Text="PotionCoop.dll скопирован в $(GameDir)\BepInEx\plugins" />
+    <!-- отпечаток игры, под которую собран мод: если игра обновится, мод сам выключится -->
+    <Exec ContinueOnError="true" Command="powershell -NoProfile -Command &quot;(Get-FileHash -LiteralPath '$(GameDir)\GameAssembly.dll' -Algorithm SHA256).Hash | Set-Content -NoNewline -Encoding ascii -LiteralPath '$(GameDir)\BepInEx\plugins\PotionCoop.gamehash'&quot;" />
+  </Target>
+
+</Project>
