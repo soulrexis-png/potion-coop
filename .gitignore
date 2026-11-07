@@ -1,0 +1,10 @@
+bin/
+obj/
+out/
+*.user
+.vs/
+Installer/payload.zip
+PotionCoopSetup*.exe
+*.log
+github_upload/
+github_release/
