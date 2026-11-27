@@ -1,3 +1,4 @@
+# Build output and local files that must not be committed
 bin/
 obj/
 out/

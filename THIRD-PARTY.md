@@ -8,3 +8,5 @@ The installer (`PotionCoopSetup.exe`) ships the following third-party software. 
 | .NET runtime (`dotnet\` folder, shipped with BepInEx) | runs the loader and the mod | [MIT](https://github.com/dotnet/runtime/blob/main/LICENSE.TXT) |
 
 *A Place for Every Potion* is © CubeQuad Games. This project contains no game files and is not affiliated with CubeQuad Games.
+
+*Translations in the mod (11 languages) are written by hand and machine-assisted; report mistakes in Issues.*
