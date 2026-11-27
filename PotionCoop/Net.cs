@@ -20,8 +20,8 @@ public class NetDriver : MonoBehaviour
     const int Channel = 7;          // свой канал, чтобы не пересекаться с игрой
     const int SendReliable = 8;     // k_nSteamNetworkingSend_Reliable
     const int SendUnreliable = 0;
-    const byte MsgHello = 1, MsgHelloAck = 2, MsgPing = 3, MsgPong = 4, MsgState = 5, MsgRoom = 6, MsgSaveReq = 7, MsgSave = 8, MsgMove = 9, MsgEmote = 10, MsgMod = 11, MsgXp = 12, MsgXpTotal = 13, MsgSkills = 14, MsgSkillsSet = 15, MsgWorldSkills = 16, MsgSteals = 17, MsgScored = 18, MsgMark = 19, MsgColors = 20, MsgHook = 21;
-    const string Proto = "PotionCoop/0.0.29";
+    const byte MsgHello = 1, MsgHelloAck = 2, MsgPing = 3, MsgPong = 4, MsgState = 5, MsgRoom = 6, MsgSaveReq = 7, MsgSave = 8, MsgMove = 9, MsgEmote = 10, MsgMod = 11, MsgXp = 12, MsgXpTotal = 13, MsgSkills = 14, MsgSkillsSet = 15, MsgWorldSkills = 16, MsgSteals = 17, MsgScored = 18, MsgMark = 19, MsgColors = 20, MsgHook = 21, MsgTourney = 22, MsgLogReq = 23, MsgLogs = 24, MsgPush = 25, MsgPushResult = 26, MsgMembers = 27, MsgCfg = 28;
+    const string Proto = "PotionCoop/0.0.61";
     const float StateRate = 0.1f;   // 10 раз в секунду
     const float PeerTimeout = 20f;   // загрузка лаборатории может подвесить игру на 10+ секунд
 
@@ -43,6 +43,45 @@ public class NetDriver : MonoBehaviour
         public float MarkAt = -99f;     // когда позвал «я тут»
         public int WantColor = -1;      // какой цвет хочет
         public string RoomName = "", RoomId = "";   // какую аптеку открыл (если хост)
+        public readonly HashSet<ulong> Members = new();   // если он хост: кто в его аптеке (он присылает сам)
+        public float LogGivenAt = -999f;                  // когда я последний раз отдал ему логи
+        public float XpWindowAt; public int XpInWindow;   // сколько опыта он прислал за последние 10 с
+    }
+
+    // ---------- кто в моей аптеке ----------
+    // Раньше мод считал одной компанией всех друзей на связи: ходы, положение, толчки и логи ходили между любыми
+    // друзьями с модом, даже если они в разных аптеках или вообще в меню. Теперь игровые сообщения принимаются
+    // и шлются только участникам своей аптеки. Хост: кто просил у него сейв этой аптеки. Гость: хост и те,
+    // кого хост назвал участниками (MsgMembers). Выключается настройкой Rooms/StrictRooms (у всех сразу).
+    readonly HashSet<ulong> _guests = new(); string _guestsRoom = "";
+    [Il2CppInterop.Runtime.Attributes.HideFromIl2Cpp] bool Mate(ulong id)
+    {
+        if (id == _me) return false;
+        if (!Plugin.StrictRooms.Value) return _peers.ContainsKey(id);
+        if (Coop.Role == Role.Host)
+        {
+            if (_guestsRoom != Coop.RoomId) { _guests.Clear(); _guestsRoom = Coop.RoomId; }   // другая аптека — другие гости
+            return _guests.Contains(id);
+        }
+        if (Coop.Role == Role.Guest)
+            return id == Coop.HostId || (_peers.TryGetValue(Coop.HostId, out var h) && h.Members.Contains(id));
+        return false;
+    }
+    ulong FirstMate() { foreach (var id in _peers.Keys) if (Mate(id)) return id; return _me; }
+    [Il2CppInterop.Runtime.Attributes.HideFromIl2Cpp] List<ulong> RoomPeers() => _peers.Keys.Where(Mate).ToList();
+    [Il2CppInterop.Runtime.Attributes.HideFromIl2Cpp] void SendMembers()
+    {
+        if (Coop.Role != Role.Host) return;
+        var ids = RoomPeers();
+        var b = new byte[2 + 8 * ids.Count];
+        Buffer.BlockCopy(BitConverter.GetBytes((ushort)ids.Count), 0, b, 0, 2);
+        for (int i = 0; i < ids.Count; i++) Buffer.BlockCopy(BitConverter.GetBytes(ids[i]), 0, b, 2 + 8 * i, 8);
+        // настройки, от которых зависит честность: у гостей действуют значения хоста, а не свои
+        var cfg = new byte[12];
+        Buffer.BlockCopy(BitConverter.GetBytes(Math.Max(0, Plugin.HandBonus.Value)), 0, cfg, 0, 4);
+        Buffer.BlockCopy(BitConverter.GetBytes(Math.Max(0, Plugin.ApronBonus.Value)), 0, cfg, 4, 4);
+        Buffer.BlockCopy(BitConverter.GetBytes(Math.Max(1, Plugin.PushEvery.Value)), 0, cfg, 8, 4);
+        foreach (var id in ids) { Send(id, MsgMembers, b, SendReliable); Send(id, MsgCfg, cfg, SendReliable); }
     }
     public string MyName => _ready ? SteamFriends.GetPersonaName() : null;
     float _selfMarkAt = -99f;
@@ -65,7 +104,7 @@ public class NetDriver : MonoBehaviour
     // 8 эмоций, 4 действия и 13-я плитка — письмо-инструкция
     static string[] WheelLabels => Loc.Ru
         ? new[] { "♥", "☺", "?", "!", "#@!", "Zz", "♪", "★", "Дэб", "Руки\nвверх", "Танец", "Испуг", "Письмо" }
-        : new[] { "♥", "☺", "?", "!", "#@!", "Zz", "♪", "★", "Dab", "Hands\nup", "Dance", "Scared", "Letter" };
+        : new[] { "♥", "☺", "?", "!", "#@!", "Zz", "♪", "★", Loc.Tr("Dab"), Loc.Tr("Hands\nup"), Loc.Tr("Dance"), Loc.Tr("Scared"), Loc.Tr("Letter") };
     const int WheelN = 13;
     const float WheelStep = 360f / WheelN;
     static readonly int[] ActionEmote = { -1, 7, 6, 3 };   // дэб — без пузыря, руки вверх — ★, танец — ♪, испуг — !
@@ -73,6 +112,14 @@ public class NetDriver : MonoBehaviour
     CodeBase.Components.Hero.HeroLook _look;   // пока колесо открыто — камеру не крутим
     float _selfEmoteAt = -99; int _selfEmote = -1;
     Avatar _dummy;
+    public static bool HasDummy => I != null && I._dummy != null;
+    [Il2CppInterop.Runtime.Attributes.HideFromIl2Cpp]
+    public static string NameOf(ulong id)
+    {
+        if (I == null) return null;
+        if (id == I._me) return SteamFriends.GetPersonaName();
+        return I._peers.TryGetValue(id, out var p) ? p.Name : null;
+    }
     bool _dummyFollows;            // false — стоит на месте лицом к тебе, true — ходит следом
     float _dummyDelay = 3f;        // задержка повтора, меняется клавишами − и +
     Vector3 _dummyEye; float _dummyYaw;
@@ -142,7 +189,7 @@ public class NetDriver : MonoBehaviour
 
     public static NetDriver I;
     public bool HasPeers => _peers.Count > 0;
-    public void BroadcastMove(byte[] payload) { foreach (var id in _peers.Keys) Send(id, MsgMove, payload, SendReliable); }
+    public void BroadcastMove(byte[] payload) { foreach (var id in RoomPeers()) Send(id, MsgMove, payload, SendReliable); }
 
     // Клики мышью по окнам мода ловим сами: стандартные кнопки IMGUI в этой игре мышь не получают
     Vector2? _click; int _clickFrame, _guardFrame, _typingEndedFrame = -1;
@@ -190,7 +237,7 @@ public class NetDriver : MonoBehaviour
     {
         if (!_typingRoom || kb == null) return;
         if (kb.escapeKey.wasPressedThisFrame) { if (!MenuButtons.ScreenOpen) { _typingRoom = false; _typingEndedFrame = Time.frameCount; } return; }
-        if (kb.enterKey.wasPressedThisFrame || kb.numpadEnterKey.wasPressedThisFrame) { _typingRoom = false; _typingEndedFrame = Time.frameCount; CreateRoom(Coop.ListRooms(), false); return; }
+        if (kb.enterKey.wasPressedThisFrame || kb.numpadEnterKey.wasPressedThisFrame) return;   // режим выбирается кнопками ниже
         if (kb.backspaceKey.wasPressedThisFrame) { if (_newRoomName.Length > 0) _newRoomName = _newRoomName.Substring(0, _newRoomName.Length - 1); return; }
         if (_newRoomName.Length >= 40) return;
         if (kb.spaceKey.wasPressedThisFrame) { _newRoomName += " "; return; }
@@ -218,6 +265,7 @@ public class NetDriver : MonoBehaviour
         {
             if (!_ready && !TryInit()) return;
             TickCoopScreen(Keyboard.current);
+            if (_typingRoom && Coop.State == eGameState.Playing) _typingRoom = false;   // страховка: в лаборатории печатать название нельзя
             TickTyping(Keyboard.current);
 
             if (Time.unscaledTime >= _nextScan)
@@ -225,10 +273,24 @@ public class NetDriver : MonoBehaviour
                 _nextScan = Time.unscaledTime + 5f;
                 ScanFriends();
                 DropStalePeers();
-                if (Coop.Role == Role.Host) BroadcastRoom();   // повторяем «аптека открыта» раз в 5 с — вдруг сообщение потерялось
+                if (Coop.Role == Role.Host) { BroadcastRoom(); SendMembers(); }   // повторяем «аптека открыта» раз в 5 с — вдруг сообщение потерялось
+                if (Coop.Role == Role.Host && Time.unscaledTime >= _nextRoomLog)
+                {
+                    _nextRoomLog = Time.unscaledTime + 30f;
+                    Plugin.L.LogInfo($"COOP: аптека «{Coop.RoomName}» открыта{(Tourney.On ? " (соревнование)" : "")}, объявляю: {(_peers.Count == 0 ? "некому — никого нет на связи" : string.Join(", ", _peers.Values.Select(v => v.Name)))}");
+                }
             }
 
+            // «лаборатория готова принимать ходы»: в игре (или на паузе) уже 2 с — склянки проиндексированы
+            // готовность к чужим ходам теряем только при выходе из лаборатории: пауза и меню навыков её не сбрасывают
+            bool inLobby = Coop.State == eGameState.None || Coop.State == eGameState.LoadLobby || Coop.State == eGameState.Lobby
+                        || Coop.State == eGameState.NewGame || Coop.State == eGameState.ContinueGame;
+            if (inLobby || Sync.Slots.Count == 0) _liveSince = -1f; else if (_liveSince < 0f) _liveSince = Time.unscaledTime;
+            if (Coop.Role == Role.Solo) _lateMoves.Clear();
+
             Receive();
+            if (SyncLive) FlushLateMoves();
+            TickClock();
 
             if (Time.unscaledTime >= _nextState)
             {
@@ -240,34 +302,45 @@ public class NetDriver : MonoBehaviour
             foreach (var p in _peers.Values) p.Avatar?.Tick(dt);
             TickWheel();
             Letter.Tick();
+            TourneyIntro.Tick();
             TickDummy(dt);
             if (Coop.InLobby)
             {
                 var fh = _peers.FirstOrDefault(kv => kv.Value.Hosting);
                 MenuButtons.Tick(BecomeHost, JoinHost, fh.Value != null ? fh.Key : 0, fh.Value?.Name ?? "", Coop.AutoJoin || _joinStatus != null);
             }
-            Modifiers.HostTick(_peers.Keys.Append(_me).ToList(), SendMod);
+            Modifiers.HostTick(RoomPeers().Append(_me).ToList(), SendMod);
+            Tourney.HostTick(board => { var tb = Encoding.UTF8.GetBytes(board); foreach (var id in RoomPeers()) Send(id, MsgTourney, tb, SendReliable); });
+            Tourney.MarkersTick();
+            Tourney.DumpColors();
             TickAutoJoin();
             TickAutoHost();
             TickAutoContinue();
             TickHooks();
             Skills.Tick(
                 mine => { if (_peers.ContainsKey(Coop.HostId)) Send(Coop.HostId, MsgSkillsSet, Skills.Pack(mine), SendReliable); },
-                world => { foreach (var id in _peers.Keys) Send(id, MsgWorldSkills, Skills.Pack(world), SendReliable); });
+                world => { foreach (var id in RoomPeers()) Send(id, MsgWorldSkills, Skills.Pack(world), SendReliable); });
             Xp.Tick(SendXp);
             Sync.Tick(dt);
             TickTiredBubbles();
 
             var kb = Keyboard.current;
             if (kb != null && kb.f10Key.wasPressedThisFrame) PingAll();
-            if (kb != null && kb.f11Key.wasPressedThisFrame) LogCollector.Collect();   // логи в zip на рабочий стол
-            // «я тут»: колёсико мыши (нажать) или F2 — у всех над тобой метка и стрелка по краю экрана
+            if (kb != null && kb.f11Key.wasPressedThisFrame) StartCollectLogs();   // логи в zip на рабочий стол (+ логи всех, кто на связи)
+            if (_logWaitUntil > 0 && (Time.unscaledTime > _logWaitUntil || _guestLogs.Count >= _logAsked)) { _logWaitUntil = 0; LogCollector.Collect(_guestLogs, SteamFriends.GetPersonaName()); }
+            // «я тут»: G или F2 — у всех над тобой метка и стрелка по краю экрана (колёсико мыши занято игрой)
             if (Coop.State == eGameState.Playing && Coop.Role != Role.Solo && !_wheelOpen
-                && ((kb != null && kb.f2Key.wasPressedThisFrame) || (Mouse.current != null && Mouse.current.middleButton.wasPressedThisFrame))
+                && kb != null && (kb.f2Key.wasPressedThisFrame || kb.gKey.wasPressedThisFrame) && !_typingRoom
                 && Time.unscaledTime - _selfMarkAt > 1.5f)
                 SendMark();
-            if (kb != null && kb.f9Key.wasPressedThisFrame) ToggleDummy();
-            if (kb != null && kb.f6Key.wasPressedThisFrame) Modifiers.SetTired(!Modifiers.Tired, "F6, проверка");
+            if (kb != null && kb.f9Key.wasPressedThisFrame)
+            {
+                // в соревновании F9 у хоста — «старт», иначе — проверочный болванчик
+                if (Tourney.On && Coop.Role == Role.Host && Coop.State == eGameState.Playing && !Tourney.Started) Tourney.PressStart();
+                else ToggleDummy();
+            }
+            // F6 — проверка переутомления: только хост и одиночка (у гостя это был бы чит)
+            if (kb != null && kb.f6Key.wasPressedThisFrame && Coop.Role != Role.Guest) Modifiers.SetTired(!Modifiers.Tired, "F6, проверка");
             // выбор аптеки с клавиатуры: 0 — мой сейв, 1–9 — аптеки по списку, Esc — закрыть
             if (kb != null && _roomPicker && Coop.InLobby && !_typingRoom && _typingEndedFrame != Time.frameCount)
             {
@@ -276,24 +349,25 @@ public class NetDriver : MonoBehaviour
                 for (int i = 0; i < digits.Length && i < rooms.Length; i++)
                     if (digits[i].wasPressedThisFrame) { _roomPicker = false; Coop.RelaunchAsHost(rooms[i]); }
                 if (kb.escapeKey.wasPressedThisFrame) _roomPicker = false;
-                if (kb.nKey.wasPressedThisFrame) CreateRoom(rooms, false);
+                if (kb.nKey.wasPressedThisFrame) OpenCreateScreen();
             }
+            // меню модификаторов: F8 у хоста (и в одиночной игре — для проверки)
+            if (kb != null && (Coop.Role == Role.Host || Coop.Role == Role.Solo) && Coop.State == eGameState.Playing && !_typingRoom)
+            {
+                // в соревновании до старта меню сразу стоит на «Перемешать команды»
+                if (kb.f8Key.wasPressedThisFrame) { _modMenu = !_modMenu; _modSel = Tourney.On && !Tourney.Started && Coop.Role == Role.Host ? ModItems.Length - 1 : 0; }
+                else if (_modMenu) TickModMenu(kb);
+            }
+            else _modMenu = false;
+            // толчок (перк соперничества): H, глядя на игрока рядом
+            if (kb != null && kb.hKey.wasPressedThisFrame && Coop.State == eGameState.Playing && !_typingRoom && Plugin.PushOn.Value) TryPush();
             // проверочные клавиши хоста
             if (kb != null && Coop.Role == Role.Host && Coop.State == eGameState.Playing)
             {
                 if (kb.f5Key.wasPressedThisFrame) { Sync.ForceBreakNext = true; Coop.Say(Loc.L("Следующий бросок разобьёт склянку", "The next throw will break the flask"), 3f); }
                 if (kb.f4Key.wasPressedThisFrame) SendMod(Modifiers.Quake, 0, true);
-                if (kb.f3Key.wasPressedThisFrame) SendMod(Modifiers.Leaky, _peers.Count > 0 ? _peers.Keys.First() : _me, true);
-                if (kb.f7Key.wasPressedThisFrame) SendMod(Modifiers.Blind, _peers.Count > 0 ? _peers.Keys.First() : _me, true);
-                // F8 — аварийная кнопка: снять все модификаторы у всех и больше не насылать (ещё раз — включить обратно)
-                if (kb.f8Key.wasPressedThisFrame)
-                {
-                    Modifiers.Paused = !Modifiers.Paused;
-                    if (Modifiers.Paused) SendMod(Modifiers.ClearAll, 0, true);
-                    Coop.Say(Modifiers.Paused ? Loc.L("Модификаторы выключены у всех (F8 — включить)", "Modifiers are off for everyone (F8 to turn back on)")
-                                              : Loc.L("Модификаторы снова включены", "Modifiers are back on"), 4f);
-                    Plugin.L.LogInfo(Modifiers.Paused ? "MOD: хост выключил модификаторы у всех" : "MOD: хост включил модификаторы обратно");
-                }
+                if (kb.f3Key.wasPressedThisFrame) SendMod(Modifiers.Leaky, FirstMate(), true);
+                if (kb.f7Key.wasPressedThisFrame) SendMod(Modifiers.Blind, FirstMate(), true);
             }
             // Дальтоник-дух можно проверить и одному: F7 в лаборатории
             if (kb != null && Coop.Role == Role.Solo && Coop.State == eGameState.Playing && kb.f7Key.wasPressedThisFrame)
@@ -329,7 +403,7 @@ public class NetDriver : MonoBehaviour
         }
         catch { return false; } // Steam ещё не поднят игрой — тихо ждём
         _appId = SteamUtils.GetAppID().m_AppId;
-        _me = SteamUser.GetSteamID().m_SteamID;
+        _me = SteamUser.GetSteamID().m_SteamID; Sync.MyId = _me;
         _inbox = new Il2CppStructArray<IntPtr>(64);
         _ready = true;
         _nextScan = 0;
@@ -375,6 +449,18 @@ public class NetDriver : MonoBehaviour
     }
 
     bool _acceptWarned;
+    // F11: свои логи + просим у всех на связи их логи, ждём до 8 с
+    float _logWaitUntil; int _logAsked; readonly Dictionary<string, byte[]> _guestLogs = new();
+    void StartCollectLogs()
+    {
+        _guestLogs.Clear();
+        var mates = RoomPeers();   // логи просим только у тех, кто со мной в одной аптеке
+        if (mates.Count == 0) { LogCollector.Collect(null); return; }
+        foreach (var id in mates) Send(id, MsgLogReq, Array.Empty<byte>(), SendReliable);
+        _logAsked = mates.Count;
+        _logWaitUntil = Time.unscaledTime + 8f;
+        Coop.Say(Loc.L("Собираю логи — свои и всех, кто в аптеке…", "Collecting logs — mine and everyone in the pharmacy…"), 5f);
+    }
     void DropStalePeers()
     {
         foreach (var id in _peers.Keys.ToList())
@@ -403,14 +489,16 @@ public class NetDriver : MonoBehaviour
         var pos = t.position;
         var e = t.rotation.eulerAngles;
 
-        try { Sync.NoteMyPos(pos); } catch { }
+        try { Sync.NoteMyPos(pos, t.rotation.eulerAngles.y); } catch { }
+        var mates = RoomPeers();   // положение — только своей аптеке
+        if (mates.Count == 0) return;
         var b = new byte[20];
         Buffer.BlockCopy(BitConverter.GetBytes(pos.x), 0, b, 0, 4);
         Buffer.BlockCopy(BitConverter.GetBytes(pos.y), 0, b, 4, 4);
         Buffer.BlockCopy(BitConverter.GetBytes(pos.z), 0, b, 8, 4);
         Buffer.BlockCopy(BitConverter.GetBytes(e.y), 0, b, 12, 4);
         Buffer.BlockCopy(BitConverter.GetBytes(e.x), 0, b, 16, 4);
-        foreach (var id in _peers.Keys) Send(id, MsgState, b, SendUnreliable);
+        foreach (var id in mates) Send(id, MsgState, b, SendUnreliable);
     }
 
     void OnState(Peer p, byte[] b)
@@ -479,11 +567,13 @@ public class NetDriver : MonoBehaviour
     void BroadcastColors()
     {
         if (Coop.Role != Role.Host) return;
-        var book = ColorBook();
+        var book = new Dictionary<ulong, int>(ColorBook());
+        // в соревновании цвет аптекаря — цвет его команды
+        if (Tourney.On) foreach (var kv in Tourney.Teams) if (kv.Value >= 0) book[kv.Key] = Tourney.TeamColorOf(kv.Value);
         var sb = new StringBuilder();
         foreach (var id in _peers.Keys.Append(_me)) if (book.TryGetValue(id, out var c)) sb.Append(id).Append(':').Append(c).Append('\n');
         var bytes = Encoding.UTF8.GetBytes(sb.ToString());
-        foreach (var id in _peers.Keys) Send(id, MsgColors, bytes, SendReliable);
+        foreach (var id in RoomPeers()) Send(id, MsgColors, bytes, SendReliable);
         _colors.Clear(); foreach (var kv in book) _colors[kv.Key] = kv.Value;
         RecolorAll();
     }
@@ -496,7 +586,7 @@ public class NetDriver : MonoBehaviour
             if (pr.Length == 2 && ulong.TryParse(pr[0], out var id) && int.TryParse(pr[1], out var c)) _colors[id] = c;
         }
         RecolorAll();
-        if (_colors.TryGetValue(_me, out var mine) && Plugin.AvatarColor.Value >= 0 && mine != Plugin.AvatarColor.Value)
+        if (!Tourney.On && _colors.TryGetValue(_me, out var mine) && Plugin.AvatarColor.Value >= 0 && mine != Plugin.AvatarColor.Value)
             Coop.Say(Loc.L($"Цвет «{Avatar.ColorName(Plugin.AvatarColor.Value)}» занят — ты {Avatar.ColorName(mine)}", $"Colour {Avatar.ColorName(Plugin.AvatarColor.Value)} is taken — you are {Avatar.ColorName(mine)}"), 4f);
     }
 
@@ -549,6 +639,8 @@ public class NetDriver : MonoBehaviour
     public void OnGameState(eGameState id)
     {
         if (id != eGameState.LoadLobby && id != eGameState.Lobby) return;
+        if (Coop.AutoHost) { Plugin.L.LogInfo($"COOP: {id} во время открытия аптеки — аптеку не закрываю"); return; }
+        Tourney.On = false; Tourney.Board = ""; Tourney.Winner = null; Tourney.Started = false; Tourney.ClearMarkers();   // хост перечитает при открытии аптеки
         if (Coop.Role == Role.Host)
         {
             Coop.Role = Role.Solo;
@@ -559,7 +651,7 @@ public class NetDriver : MonoBehaviour
         {
             try { Sync.AnnounceLeft(); } catch { }
             Coop.Role = Role.Solo;
-            Coop.Say(Loc.L("Ты вышел из общей аптеки. «Продолжить» вернёт тебя в твою игру (с перезапуском).", "You left the shared pharmacy. Continue takes you back to your own game (with a restart)."), 8f);
+            Coop.Say(Loc.L("Ты вышел из общей аптеки. «Продолжить» вернёт тебя в твою игру.", "You left the shared pharmacy. Continue takes you back to your own game."), 8f);
         }
     }
 
@@ -569,6 +661,8 @@ public class NetDriver : MonoBehaviour
         else if (Coop.Role == Role.Guest) try { Sync.AnnounceLeft(); } catch { }
     }
 
+    float _nextRoomLog;
+    readonly HashSet<string> _guiErrors = new();
     bool _roomPicker, _typingRoom; string _newRoomName = "";
     void BecomeHost()
     {
@@ -579,27 +673,56 @@ public class NetDriver : MonoBehaviour
 
     // Экран «Общие аптеки» из копий родных кнопок меню
     string HostsKey() => string.Join(",", _peers.Where(kv => kv.Value.Hosting).Select(kv => kv.Key + ":" + kv.Value.RoomName));
+    // Главный экран «Общие аптеки»: зайти к другу (если кто-то открыл) · Открыть… · Создать… · Ещё… · Назад
     void OpenCoopScreen()
     {
         var list = new List<MenuButtons.Entry>();
-        foreach (var kv in _peers.Where(kv => kv.Value.Hosting).ToList())
+        foreach (var kv in _peers.Where(kv => kv.Value.Hosting).ToList().Take(2))
         {
             var id = kv.Key;
             var room = kv.Value.RoomName;
-            list.Add(new MenuButtons.Entry { Label = room != "" ? $"Зайти: {kv.Value.Name} · «{room}»" : $"Зайти в аптеку {kv.Value.Name}", Click = () => AskRestart(Loc.L($"Игра перезапустится. Зайти к {kv.Value.Name}?", $"The game will restart. Join {kv.Value.Name}?"), () => { MenuButtons.CloseScreen(); JoinHost(id); }, OpenCoopScreen) });
+            list.Add(new MenuButtons.Entry { Label = room != "" ? Loc.L($"Зайти: {kv.Value.Name} · «{room}»", $"Join: {kv.Value.Name} · \"{room}\"") : Loc.L($"Зайти в аптеку {kv.Value.Name}", $"Join {kv.Value.Name}'s pharmacy"), Click = () => { MenuButtons.CloseScreen(); JoinHost(id); } });
         }
-        foreach (var room in Coop.ListRooms().Take(4))
+        if (Coop.ListRooms().Length > 0) list.Add(new MenuButtons.Entry { Label = Loc.L("Открыть аптеку…", "Open a pharmacy…"), Click = OpenRoomsScreen });
+        list.Add(new MenuButtons.Entry { Label = Loc.L("Создать аптеку…", "Create a pharmacy…"), Click = OpenCreateScreen });
+        list.Add(new MenuButtons.Entry { Label = Loc.L("Ещё: цвет, удаление…", "More: colour, delete…"), Click = OpenMoreScreen });
+        list.Add(new MenuButtons.Entry { Label = Loc.L("Назад", "Back"), Click = () => MenuButtons.CloseScreen() });
+        MenuButtons.OpenScreen(list, HostsKey(), "main");
+        _typingRoom = false;
+    }
+    // Открыть: список своих аптек
+    void OpenRoomsScreen()
+    {
+        var list = new List<MenuButtons.Entry>();
+        foreach (var room in Coop.ListRooms().Take(5))
         {
             var r = room;
-            list.Add(new MenuButtons.Entry { Label = $"Открыть: «{r}»", Click = () => AskRestart(Loc.L($"Игра перезапустится. Открыть «{r}»?", $"The game will restart. Open \"{r}\"?"), () => { MenuButtons.CloseScreen(); Coop.RelaunchAsHost(r); }, OpenCoopScreen) });
+            list.Add(new MenuButtons.Entry { Label = $"«{r}»", Click = () => OpenRoom(r, false) });
         }
-        list.Add(new MenuButtons.Entry { Label = NameLabel(), IsName = true, Click = () => CreateRoom(Coop.ListRooms(), false) });
-        list.Add(new MenuButtons.Entry { Label = "+ Новая аптека из моего сейва", Click = () => CreateRoom(Coop.ListRooms(), true) });
-        // цвет и удаление — на отдельном экране «Ещё…»: иначе кнопки уезжают за край экрана
-        list.Add(new MenuButtons.Entry { Label = "Ещё: цвет, удаление аптек…", Click = OpenMoreScreen });
-        list.Add(new MenuButtons.Entry { Label = "Назад", Click = () => MenuButtons.CloseScreen() });
-        MenuButtons.OpenScreen(list, HostsKey());
-        _typingRoom = true;   // на этом экране буквы сразу идут в название новой аптеки
+        list.Add(new MenuButtons.Entry { Label = Loc.L("Назад", "Back"), Click = OpenCoopScreen });
+        MenuButtons.OpenScreen(list, HostsKey(), "rooms");
+        _typingRoom = false;
+    }
+    // Создать: название (печатай с клавиатуры) и что создать
+    void OpenCreateScreen()
+    {
+        var list = new List<MenuButtons.Entry>
+        {
+            new MenuButtons.Entry { Label = NameLabel(), IsName = true, Click = () => { } },
+            new MenuButtons.Entry { Label = Loc.L("Общая игра — собираем вместе", "Together — one lab for everyone"), Click = () => { if (NameFree()) CreateRoom(Coop.ListRooms(), false); } },
+            new MenuButtons.Entry { Label = Loc.L("Соревнование — команды наперегонки", "Competition — teams race"), Click = () => { if (!NameFree()) return; _tTeams = 2; _tSize = 0; _tArb = false; _tPal = new[] { 3, 4, 5, 2, 0, 1 }; OpenTourneySetup(); } },
+            new MenuButtons.Entry { Label = Loc.L("Общая игра из моего сейва", "Together, from my own save"), Click = () => { if (NameFree()) CreateRoom(Coop.ListRooms(), true); } },
+            new MenuButtons.Entry { Label = Loc.L("Назад", "Back"), Click = OpenCoopScreen },
+        };
+        MenuButtons.OpenScreen(list, HostsKey(), "create");
+        _typingRoom = true;   // на этом экране буквы сразу идут в название
+    }
+    bool NameFree()
+    {
+        var name = Coop.SafeRoomName(_newRoomName);
+        if (Array.IndexOf(Coop.ListRooms(), name) < 0) return true;
+        Coop.Say(Loc.L($"Аптека «{name}» уже есть — придумай другое название", $"Pharmacy \"{name}\" already exists — pick another name"), 3f);
+        return false;
     }
 
     // «Игра перезапустится. Продолжить?» — Да / Отмена. Без родных кнопок меню — сразу делаем
@@ -608,12 +731,85 @@ public class NetDriver : MonoBehaviour
         if (!MenuButtons.Ok) { yes(); return; }
         var list = new List<MenuButtons.Entry>
         {
-            new MenuButtons.Entry { Label = question, Click = () => { } },
+            new MenuButtons.Entry { Label = question, Click = () => { }, IsLabel = true },
             new MenuButtons.Entry { Label = Loc.L("Да, перезапустить", "Yes, restart"), Click = yes },
             new MenuButtons.Entry { Label = Loc.L("Отмена", "Cancel"), Click = no ?? (() => MenuButtons.CloseScreen()) },
         };
         MenuButtons.OpenScreen(list, HostsKey());
         _typingRoom = false;
+    }
+
+    // ---- настройка соревнования: команды, игроков в команде, цвета, роль организатора ----
+    // клик по строке листает значение; лишние игроки (команды полные) становятся зрителями
+    int _tTeams = 2, _tSize; bool _tArb; int[] _tPal = { 3, 4, 5, 2, 0, 1 };
+    void OpenTourneySetup()
+    {
+        string size = _tSize == 0 ? Loc.L("сколько придёт", "no limit") : _tSize.ToString();
+        var list = new List<MenuButtons.Entry>
+        {
+            new MenuButtons.Entry { Label = Loc.L($"Команд: {_tTeams}", $"Teams: {_tTeams}"),
+                Left = () => { _tTeams = _tTeams <= 2 ? 6 : _tTeams - 1; OpenTourneySetup(); },
+                Right = () => { _tTeams = _tTeams >= 6 ? 2 : _tTeams + 1; OpenTourneySetup(); } },
+            new MenuButtons.Entry { Label = Loc.L($"В команде: {size}", $"Per team: {size}"),
+                Left = () => { _tSize = _tSize <= 0 ? 3 : _tSize - 1; OpenTourneySetup(); },
+                Right = () => { _tSize = _tSize >= 3 ? 0 : _tSize + 1; OpenTourneySetup(); } },
+            new MenuButtons.Entry { Label = _tArb ? Loc.L("Ты: арбитр", "You: arbiter") : Loc.L("Ты: играешь", "You: playing"),
+                Left = () => { _tArb = !_tArb; OpenTourneySetup(); }, Right = () => { _tArb = !_tArb; OpenTourneySetup(); } },
+            new MenuButtons.Entry { Label = Loc.L("Цвета команд…", "Team colours…"), Click = OpenTeamColors },
+            new MenuButtons.Entry { Label = Loc.L("Дальше →", "Next →"), Click = () => OpenSizeScreen(_tArb) },
+            new MenuButtons.Entry { Label = Loc.L("Назад", "Back"), Click = OpenCreateScreen },
+        };
+        MenuButtons.OpenScreen(list, HostsKey(), "setup");
+        _typingRoom = false;
+    }
+    void OpenTeamColors()
+    {
+        var list = new List<MenuButtons.Entry>();
+        for (int i = 0; i < _tTeams; i++)
+        {
+            int t = i;
+            list.Add(new MenuButtons.Entry { Label = Loc.L($"Команда {t + 1}: {Tourney.PalName(_tPal[t])}", $"Team {t + 1}: {Tourney.PalName(_tPal[t])}"),
+                Left = () => { NextTeamColor(t, -1); OpenTeamColors(); }, Right = () => { NextTeamColor(t, +1); OpenTeamColors(); } });
+        }
+        list.Add(new MenuButtons.Entry { Label = Loc.L("Готово", "Done"), Click = OpenTourneySetup });
+        MenuButtons.OpenScreen(list, HostsKey());
+        _typingRoom = false;
+    }
+    void NextTeamColor(int t, int dir)
+    {
+        // следующий (или предыдущий) из шести цветов турнира, не занятый другой командой
+        int n = Tourney.Groups.Length;
+        int g = Tourney.GroupOfPal(_tPal[t]); if (g < 0) g = 0;
+        for (int k = 0; k < n; k++)
+        {
+            g = (g + dir + n) % n;
+            bool used = false;
+            for (int j = 0; j < _tTeams; j++) if (j != t && _tPal[j] == Tourney.Groups[g].pal) used = true;
+            if (!used) break;
+        }
+        _tPal[t] = Tourney.Groups[g].pal;
+    }
+    void OpenSizeScreen(bool arbiter) => Screen3(Loc.L("Соревнование: сколько собирать?", "Competition: how much to fill?"),
+            (Loc.L("Вся лаборатория", "The whole lab"), () => CreateTourney(arbiter, 0)),
+            (Loc.L("По шкафу на семейство", "One cabinet per family"), () => CreateTourney(arbiter, 1)),
+            (Loc.L("Тест: 6 + 6 своих и общие", "Test: 6 + 6 own plus commons"), () => CreateTourney(arbiter, -1)));
+    void Screen3(string question, params (string label, Action click)[] options)
+    {
+        var list = new List<MenuButtons.Entry> { new MenuButtons.Entry { Label = question, Click = () => { }, IsLabel = true } };
+        foreach (var (label, click) in options) list.Add(new MenuButtons.Entry { Label = label, Click = click });
+        list.Add(new MenuButtons.Entry { Label = Loc.L("Назад", "Back"), Click = OpenCoopScreen });
+        MenuButtons.OpenScreen(list, HostsKey());
+        _typingRoom = false;
+    }
+    void CreateTourney(bool arbiter, int rows)
+    {
+        var name = Coop.SafeRoomName(_newRoomName);
+        if (Array.IndexOf(Coop.ListRooms(), name) >= 0) { OpenCoopScreen(); return; }
+        Coop.MarkFresh(name);
+        Coop.EnsureRoomId(name);
+        Tourney.Write(name, arbiter, rows, _tTeams, _tSize, _tPal);
+        Plugin.L.LogInfo($"COOP: создано соревнование «{name}»: {(arbiter ? "арбитр" : "хост играет")}, {(rows == 0 ? "вся лаборатория" : rows < 0 ? "тест: по ряду" : rows + " полки")}");
+        OpenRoom(name, true);
     }
 
     void OpenMoreScreen()
@@ -649,7 +845,7 @@ public class NetDriver : MonoBehaviour
     {
         var list = new List<MenuButtons.Entry>
         {
-            new MenuButtons.Entry { Label = $"Точно удалить «{room}»?", Click = () => { } },
+            new MenuButtons.Entry { Label = $"Точно удалить «{room}»?", Click = () => { }, IsLabel = true },
             new MenuButtons.Entry { Label = "Да, удалить", Click = () => { Coop.DeleteRoom(room); OpenDeleteScreenOrBack(); } },
             new MenuButtons.Entry { Label = "Отмена", Click = OpenDeleteScreen },
         };
@@ -657,29 +853,23 @@ public class NetDriver : MonoBehaviour
         _typingRoom = false;
     }
     string ColorLabel() => $"Мой цвет: {Avatar.ColorName(Plugin.AvatarColor.Value)}";
-    void NextColor()
-    {
-        int c = Plugin.AvatarColor.Value + 1; if (c > 11) c = -1;
-        Plugin.AvatarColor.Value = c;
-        foreach (var id in _peers.Keys) Send(id, MsgHello, HelloBytes, SendReliable);   // хост узнает и перераздаст
-        OpenCoopScreen();
-    }
-    string NameLabel() => $"+ Новая аптека: «{_newRoomName}{((Time.unscaledTime * 2f % 2f) < 1f ? "|" : " ")}»";
+    string NameLabel() => Loc.L("Название: ", "Name: ") + $"«{_newRoomName}{((Time.unscaledTime * 2f % 2f) < 1f ? "|" : " ")}»";
     void TickCoopScreen(Keyboard kb)
     {
-        if (!MenuButtons.ScreenOpen) return;
+        if (!MenuButtons.ScreenOpen) { if (!_roomPicker) _typingRoom = false; return; }
         if (!Coop.InLobby) { MenuButtons.CloseScreen(); _typingRoom = false; return; }
-        bool main = MenuButtons.HasNameButton;   // главный экран (с полем названия), а не удаление/подтверждение
-        _typingRoom = main;
+        bool main = MenuButtons.Tag == "main", create = MenuButtons.HasNameButton;
+        _typingRoom = create;
+        // Esc: с главного — закрыть, с любого другого — на главный
         if (kb != null && kb.escapeKey.wasPressedThisFrame) { if (main) { MenuButtons.CloseScreen(); _typingRoom = false; } else OpenCoopScreen(); return; }
-        if (!main) return;
-        MenuButtons.SetNameLabel(NameLabel());
-        if (MenuButtons.HostsChanged(HostsKey())) OpenCoopScreen();   // друг открыл/закрыл аптеку — обновляем список
+        if (create) MenuButtons.SetNameLabel(NameLabel());
+        if (main && MenuButtons.HostsChanged(HostsKey())) OpenCoopScreen();   // друг открыл/закрыл аптеку — обновляем список
     }
 
     void JoinHost(ulong hostId)
     {
         Coop.Role = Role.Guest;
+        _lateMoves.Clear(); Plugin.HostCfg = false;
         Coop.HostId = hostId; Coop.HostName = _peers[hostId].Name;
         _joinStatus = Loc.L($"Получаю аптеку {Coop.HostName}…", $"Getting {Coop.HostName}'s pharmacy…");
         _joinRequestedAt = Time.unscaledTime;
@@ -695,9 +885,13 @@ public class NetDriver : MonoBehaviour
         if (Time.unscaledTime - Coop.AutoHostSince < 1.5f) return;   // даём меню собраться
         Coop.AutoHost = false;
         Coop.Role = Role.Host; Coop.HostId = _me; Coop.HostName = SteamFriends.GetPersonaName();
+        Coop.BackupRoom();   // копия аптеки до того, как игра начнёт в неё писать
+        _nextRoomLog = 0; _nextScan = 0;   // сразу пересканировать друзей и объявить аптеку
         BroadcastRoom();
         AssignColor(_me, Plugin.AvatarColor.Value, "я");
         foreach (var kv in _peers) AssignColor(kv.Key, kv.Value.WantColor, kv.Value.Name);
+        Tourney.Load();
+        Tourney.AssignTeams(_me, RoomPeers());
         BroadcastColors();
         // новая аптека (метка new.flag) → «Новая игра»; иначе «Продолжить»
         bool fresh = Coop.TakeFresh();   // метка ставится при «+ Новая аптека»
@@ -729,7 +923,7 @@ public class NetDriver : MonoBehaviour
         if (Time.unscaledTime - Coop.AutoJoinSince > 45f)
         {
             Coop.AutoJoin = false; Coop.Role = Role.Solo;
-            Coop.Say(Loc.L($"{Coop.HostName} не открыл аптеку. Перезапусти игру, чтобы играть со своим сейвом.", $"{Coop.HostName} has not opened a pharmacy. Restart the game to play your own save."), 12f);
+            Coop.Say(Loc.L($"{Coop.HostName} не открыл аптеку. «Продолжить» вернёт тебя в твою игру.", $"{Coop.HostName} has not opened a pharmacy. Continue takes you back to your own game."), 12f);
         }
     }
 
@@ -738,7 +932,7 @@ public class NetDriver : MonoBehaviour
     {
         var b = BitConverter.GetBytes(value);
         if (toHost) { if (_peers.ContainsKey(Coop.HostId)) Send(Coop.HostId, MsgXp, b, SendReliable); }
-        else foreach (var id in _peers.Keys) Send(id, MsgXpTotal, b, SendReliable);
+        else foreach (var id in RoomPeers()) Send(id, MsgXpTotal, b, SendReliable);
     }
 
     // ---------- модификаторы ----------
@@ -750,16 +944,131 @@ public class NetDriver : MonoBehaviour
         if (mod == Modifiers.Fatigue)
         {
             if (target == _me) { Modifiers.SetTired(on, "хост"); return; }
-            foreach (var id in _peers.Keys) Send(id, MsgMod, b, SendReliable);
+            foreach (var id in RoomPeers()) Send(id, MsgMod, b, SendReliable);
             if (_peers.TryGetValue(target, out var tp)) tp.Tired = on;
             return;
         }
-        foreach (var id in _peers.Keys) Send(id, MsgMod, b, SendReliable);
+        foreach (var id in RoomPeers()) Send(id, MsgMod, b, SendReliable);
         ApplyMod(mod, target, "хост");   // у себя тоже
         if (mod == Modifiers.ClearAll) foreach (var p in _peers.Values) p.Tired = false;
     }
 
-    float _shakeUntil;
+    float _shakeUntil, _lastPushedAt = -99f;
+
+    // ---------- меню модификаторов (F8) ----------
+    // ↑/↓ — выбрать, Enter — включить/выключить, → — наслать сейчас (проверка), F8/Esc — закрыть
+    bool _modMenu; int _modSel;
+    static readonly (byte mod, string ru, string en)[] ModItems =
+    {
+        (Modifiers.Fatigue, "Переутомление", "Fatigue"),
+        (Modifiers.Leaky, "Дырявый карман", "Leaky pocket"),
+        (Modifiers.Quake, "Землетрясение", "Earthquake"),
+        (Modifiers.Blind, "Дальтоник-дух", "Colour-blind spirit"),
+        (0, "Все модификаторы", "All modifiers"),
+        (254, "Перемешать команды (до старта)", "Shuffle teams (before start)"),
+    };
+    [Il2CppInterop.Runtime.Attributes.HideFromIl2Cpp] static BepInEx.Configuration.ConfigEntry<bool> ModCfg(byte m) => m switch
+    {
+        Modifiers.Fatigue => Plugin.ModFatigue, Modifiers.Leaky => Plugin.ModLeaky,
+        Modifiers.Quake => Plugin.ModQuake, Modifiers.Blind => Plugin.ModBlind, _ => null
+    };
+    [Il2CppInterop.Runtime.Attributes.HideFromIl2Cpp] static bool ModIsOn(byte m) => m == 0 ? !Modifiers.Paused : ModCfg(m)?.Value ?? false;
+
+    [Il2CppInterop.Runtime.Attributes.HideFromIl2Cpp] void TickModMenu(Keyboard kb)
+    {
+        if (kb.escapeKey.wasPressedThisFrame) { _modMenu = false; return; }
+        if (kb.upArrowKey.wasPressedThisFrame) _modSel = (_modSel + ModItems.Length - 1) % ModItems.Length;
+        if (kb.downArrowKey.wasPressedThisFrame) _modSel = (_modSel + 1) % ModItems.Length;
+        var it = ModItems[_modSel];
+        if (kb.enterKey.wasPressedThisFrame || kb.numpadEnterKey.wasPressedThisFrame)
+        {
+            if (it.mod == 254)
+            {
+                if (Coop.Role == Role.Host && Tourney.Shuffle(_me, RoomPeers())) BroadcastColors();
+                else Coop.Say(Loc.L("Перемешать можно только в соревновании до старта", "You can shuffle only in a competition before the start"), 3f);
+            }
+            else if (it.mod == 0)
+            {
+                Modifiers.Paused = !Modifiers.Paused;
+                if (Modifiers.Paused) SendMod(Modifiers.ClearAll, 0, true);
+                Plugin.L.LogInfo(Modifiers.Paused ? "MOD: хост выключил модификаторы у всех" : "MOD: хост включил модификаторы обратно");
+            }
+            else { var c = ModCfg(it.mod); if (c != null) { c.Value = !c.Value; Plugin.L.LogInfo($"MOD: {it.ru} — {(c.Value ? "вкл" : "выкл")}"); } }
+        }
+        if (kb.rightArrowKey.wasPressedThisFrame && it.mod != 0 && it.mod != 254)
+        {
+            ulong target = FirstMate();
+            if (it.mod == Modifiers.Quake) target = 0;
+            SendMod(it.mod, target, true);
+            Plugin.L.LogInfo($"MOD: проверка из меню — {it.ru}");
+        }
+    }
+
+    // постоянная плашка, пока на тебе Дальтоник-дух: сколько осталось и как снять
+    [Il2CppInterop.Runtime.Attributes.HideFromIl2Cpp] void DrawCurseTimer()
+    {
+        if (!ColorCurse.On) return;
+        var t = Loc.L($"Дальтоник-дух · ещё {ColorCurse.Remaining:0} с", $"Colour-blind spirit · {ColorCurse.Remaining:0} s left");
+        Shadowed(new Rect(Screen.width / 2f - 360, 64, 720, 30), t, _tagStyle, Color.white);
+    }
+
+    GUIStyle _modSt;
+    [Il2CppInterop.Runtime.Attributes.HideFromIl2Cpp] void DrawModMenu()
+    {
+        if (!_modMenu) return;
+        float x = Screen.width / 2f - 200, y = Screen.height * 0.3f, y0 = y;
+        bool tmp = Sigils.FontReady;
+        if (_modSt == null) _modSt = new GUIStyle(GUI.skin.label) { fontSize = 18, fontStyle = FontStyle.Bold };
+        // лямбда, а не локальная функция: локальные функции становятся методами NetDriver с параметром-структурой,
+        // и BepInEx не может зарегистрировать такой класс в игре (мод не загружается целиком)
+        Action<string, string, Color, int> Line = (key, text, c, size) =>
+        {
+            if (tmp) Sigils.WantText(key, text, c, x, y, size + 3);
+            else { _modSt.normal.textColor = c; _modSt.fontSize = size; GUI.Label(new Rect(x, y, 440, size + 10), text, _modSt); }
+            y += size + 12;
+        };
+        Line("mm_title", Loc.L("Модификаторы", "Modifiers"), new Color(1f, 0.85f, 0.4f), 22);
+        for (int i = 0; i < ModItems.Length; i++)
+        {
+            var it = ModItems[i]; bool on = it.mod == 254 ? (Tourney.On && !Tourney.Started) : ModIsOn(it.mod);
+            string mark = i == _modSel ? "› " : "  ";
+            string st = it.mod == 254 ? "Enter" : on ? Loc.L("вкл", "on") : Loc.L("выкл", "off");
+            Line("mm_" + i, $"{mark}{Loc.L(it.ru, it.en)}: {st}", i == _modSel ? Color.white : (on ? new Color(0.85f, 0.95f, 0.8f) : new Color(0.7f, 0.7f, 0.7f)), 18);
+        }
+        Line("mm_help", Loc.L("↑↓ выбрать · Enter вкл/выкл · → наслать сейчас · F8 закрыть", "↑↓ select · Enter toggle · → trigger now · F8 close"), new Color(1f, 1f, 1f, 0.7f), 14);
+        if (tmp) Sigils.WantSprite("mm_bg", "panel-modal", new Color(1f, 1f, 1f, 0.95f), x + 210, (y0 + y) / 2f, 470, y - y0 + 30, 0f, back: true);
+    }
+
+    // толчок: ищем ближайшего игрока (или манекен) перед собой
+    [Il2CppInterop.Runtime.Attributes.HideFromIl2Cpp] void TryPush()
+    {
+        if (!Push.Ready) { Coop.Say(Loc.L($"Толчок ещё не готов: {Push.Charge}/{Push.Need} склянок", $"Shove not ready: {Push.Charge}/{Push.Need} shelvings"), 2.5f); return; }
+        var cam = Camera.main; if (cam == null) return;
+        ulong best = 0; Avatar bestAv = null; float bestD = float.MaxValue;
+        Action<ulong, Avatar> Consider = (id, av) =>
+        {
+            if (av?.Root == null) return;
+            var to = av.Root.transform.position - cam.transform.position; to.y = 0;
+            float d = to.magnitude; if (d > Push.Range || d >= bestD) return;
+            var f = cam.transform.forward; f.y = 0;
+            if (d > 0.5f && Vector3.Angle(f, to) > Push.Cone) return;
+            best = id; bestAv = av; bestD = d;
+        };
+        foreach (var kv in _peers) if (Mate(kv.Key)) Consider(kv.Key, kv.Value.Avatar);
+        if (_dummy != null) Consider(0, _dummy);
+        if (bestAv == null) { Coop.Say(Loc.L("Толкнуть некого — подойди к игроку и посмотри на него", "Nobody to shove — get close and look at a player"), 2.5f); return; }
+        Push.Charge = 0;
+        bestAv.ShowEmote(3);
+        if (best == 0)
+        {
+            Coop.Say(Loc.L("Ты толкнул манекен! У живого игрока выпали бы зелья из рук", "You shoved the dummy! A real player would drop their potions"), 3f);
+            Plugin.L.LogInfo("PUSH: толкнул манекен");
+            return;
+        }
+        Send(best, MsgPush, new byte[0], SendReliable);
+        Coop.Say(Loc.L($"Ты толкнул {bestAv.Name}!", $"You shoved {bestAv.Name}!"), 3f);
+        Plugin.L.LogInfo($"PUSH: толкнул {bestAv.Name}");
+    }
     // Дырявый карман и землетрясение — что происходит у каждого игрока
     void ApplyMod(byte mod, ulong target, string from)
     {
@@ -810,7 +1119,7 @@ public class NetDriver : MonoBehaviour
     public void OnLocalModChanged(byte mod, bool on)
     {
         var b = new byte[10]; b[0] = mod; b[1] = (byte)(on ? 1 : 0); Buffer.BlockCopy(BitConverter.GetBytes(_me), 0, b, 2, 8);
-        foreach (var id in _peers.Keys) Send(id, MsgMod, b, SendReliable);
+        foreach (var id in RoomPeers()) Send(id, MsgMod, b, SendReliable);
         if (on) { _selfEmote = 5; _selfEmoteAt = Time.unscaledTime; }
         if (_dummy != null && on) _dummyEmotes.Enqueue((Time.unscaledTime, 0, 5));
     }
@@ -838,7 +1147,7 @@ public class NetDriver : MonoBehaviour
 
     void DoEmote(int kind, int id)
     {
-        foreach (var pid in _peers.Keys) Send(pid, MsgEmote, new[] { (byte)kind, (byte)id }, SendReliable);
+        foreach (var pid in RoomPeers()) Send(pid, MsgEmote, new[] { (byte)kind, (byte)id }, SendReliable);
         _selfEmote = kind == 0 ? id : ActionEmote[id]; _selfEmoteAt = Time.unscaledTime;
         if (_dummy != null) _dummyEmotes.Enqueue((Time.unscaledTime, kind, id));
         Plugin.L.LogInfo($"EMOTE: {(kind == 0 ? EmoSym[id] : Avatar.Actions[id])}");
@@ -1033,19 +1342,64 @@ public class NetDriver : MonoBehaviour
     }
 
     readonly Dictionary<ulong, float> _resetAt = new();
-    public void BroadcastSteals(string packed) { var b = Encoding.UTF8.GetBytes(packed); foreach (var id in _peers.Keys) Send(id, MsgSteals, b, SendReliable); }
+    public void BroadcastSteals(string packed) { var b = Encoding.UTF8.GetBytes(packed); foreach (var id in RoomPeers()) Send(id, MsgSteals, b, SendReliable); }
     public void BroadcastScored(byte kind, int id)
     {
         var b = new byte[5]; b[0] = kind; Buffer.BlockCopy(BitConverter.GetBytes(id), 0, b, 1, 4);
-        foreach (var pid in _peers.Keys) Send(pid, MsgScored, b, SendReliable);
+        foreach (var pid in RoomPeers()) Send(pid, MsgScored, b, SendReliable);
     }
     void SendMark()
     {
         _selfMarkAt = Time.unscaledTime;
-        foreach (var id in _peers.Keys) Send(id, MsgMark, Array.Empty<byte>(), SendReliable);
+        foreach (var id in RoomPeers()) Send(id, MsgMark, Array.Empty<byte>(), SendReliable);
         Coop.Say(Loc.L("Ты позвал остальных к себе", "You called the others over"), 2.5f);
     }
 
+    // ---------- время и провалы кадров в логе ----------
+    // В логе BepInEx нет времени строк — без него нельзя привязать «просело» к событию. Раз в минуту пишем часы,
+    // а кадр дольше 250 мс в игре — отдельной строкой с временем (не чаще раза в 2 с).
+    float _nextClock, _nextHitchLog; int _hitches;
+    void TickClock()
+    {
+        float now = Time.unscaledTime;
+        if (now >= _nextClock)
+        {
+            _nextClock = now + 60f;
+            Plugin.L.LogInfo($"TIME: {DateTime.Now:HH:mm:ss}, {Coop.State}, роль {Coop.Role}, на связи {_peers.Count}, в аптеке {RoomPeers().Count}" + (_hitches > 0 ? $", провалов кадра за минуту: {_hitches}" : ""));
+            _hitches = 0;
+        }
+        float dt = Time.unscaledDeltaTime;
+        if (dt > 0.25f && Coop.State == eGameState.Playing && _liveSince >= 0f && now - _liveSince > 5f)
+        {
+            _hitches++;
+            if (now >= _nextHitchLog) { _nextHitchLog = now + 2f; Plugin.L.LogWarning($"FPS: кадр {dt * 1000f:0} мс в {DateTime.Now:HH:mm:ss}"); }
+        }
+    }
+
+    float _liveSince = -1f;
+    bool SyncLive => _liveSince >= 0f && Time.unscaledTime - _liveSince > 2f;
+    // ходы, пришедшие до загрузки лаборатории
+    readonly Queue<(ulong from, byte[] b)> _lateMoves = new();
+    [Il2CppInterop.Runtime.Attributes.HideFromIl2Cpp] void FlushLateMoves()
+    {
+        if (_lateMoves.Count == 0) return;
+        int n = _lateMoves.Count, bad = 0;
+        while (_lateMoves.Count > 0)
+        {
+            var (f, mb) = _lateMoves.Dequeue();
+            try { if (_peers.TryGetValue(f, out var lp)) Sync.Apply(f, lp.Avatar, mb, 1); } catch { bad++; }
+        }
+        Plugin.L.LogInfo($"SYNC: применил ходы, пришедшие во время загрузки: {n}" + (bad > 0 ? $" (не вышло: {bad})" : ""));
+    }
+    static string SafeNetName(string n)
+    {
+        n = (n ?? "").Trim();
+        foreach (var c in Path.GetInvalidFileNameChars()) n = n.Replace(c, '_');
+        n = n.Replace("..", "_");
+        return n.Length > 60 ? n.Substring(0, 60) : n;
+    }
+
+    int _handleErrors;
     void Receive()
     {
         for (int guard = 0; guard < 8; guard++)
@@ -1061,9 +1415,15 @@ public class NetDriver : MonoBehaviour
                     IntPtr data = Marshal.ReadIntPtr(m, 0);
                     int size = Marshal.ReadInt32(m, 8);
                     ulong from = (ulong)Marshal.ReadInt64(m, 24);
+                    if (size < 0 || size > 1_100_000) continue;   // больше сейва не бывает — мусор
                     var bytes = new byte[size];
                     if (size > 0) Marshal.Copy(data, bytes, 0, size);
                     Handle(from, bytes);
+                }
+                catch (Exception e)
+                {
+                    // одно битое или неожиданное сообщение не должно ронять кадр и терять остальные сообщения из пачки
+                    if (_handleErrors++ < 20) Plugin.L.LogError("NET: сообщение не обработано: " + e);
                 }
                 finally { SteamNetworkingMessage_t.Release(m); }
             }
@@ -1100,7 +1460,7 @@ public class NetDriver : MonoBehaviour
                     p = new Peer { Name = Name(from), LastSeen = Time.unscaledTime };
                     _peers[from] = p;
                     Plugin.L.LogInfo($"NET: >>> на связи {p.Name} ({proto}). Всего на связи: {_peers.Count}");
-                    RecolorAll();
+                    try { RecolorAll(); } catch (Exception e) { Plugin.L.LogWarning("NET: покраска аптекарей отложена: " + e.Message); }
                 }
                 p.Proto = proto; p.Launch = launch;
                 bool colorChanged = p.WantColor != want; p.WantColor = want;
@@ -1108,7 +1468,7 @@ public class NetDriver : MonoBehaviour
                 SendRoom(from);
                 // личные навыки гостю — только при первом «привете» этого запуска (раньше слались на каждый переподключающийся привет и затирали перки)
                 if (Coop.Role == Role.Host && isNew) Send(from, MsgSkills, Skills.Pack(Skills.PersonalOf(from)), SendReliable);
-                if (Coop.Role == Role.Host && (isNew || colorChanged)) { AssignColor(from, want, p.Name); BroadcastColors(); }
+                if (Coop.Role == Role.Host && (isNew || colorChanged)) { AssignColor(from, want, p.Name); if (isNew) Tourney.AssignTeams(_me, RoomPeers()); BroadcastColors(); }
                 if (proto != Proto)
                     Plugin.L.LogWarning($"NET: у {p.Name} другая версия мода ({proto}), у меня {Proto} — обновитесь до одной");
                 break;
@@ -1118,6 +1478,7 @@ public class NetDriver : MonoBehaviour
                 break;
             case MsgPong:
             {
+                if (b.Length < 9) break;
                 long sent = BitConverter.ToInt64(b, 1);
                 var ms = (int)((DateTime.UtcNow.Ticks - sent) / TimeSpan.TicksPerMillisecond);
                 if (p != null) p.PingMs = ms;
@@ -1125,10 +1486,10 @@ public class NetDriver : MonoBehaviour
                 break;
             }
             case MsgState:
-                if (p != null && p.Proto == Proto) OnState(p, b);
+                if (p != null && p.Proto == Proto && Mate(from)) OnState(p, b);
                 break;
             case MsgMod:
-                if (p == null || b.Length < 11) break;
+                if (p == null || b.Length < 11 || !Mate(from)) break;
                 // наслать модификатор может только хост; про себя (усталость) — сам игрок
                 if (!(Coop.Role == Role.Guest && Coop.HostId == from) && !(b[1] == Modifiers.Fatigue && BitConverter.ToUInt64(b, 3) == from)) break;
                 {
@@ -1145,13 +1506,21 @@ public class NetDriver : MonoBehaviour
                 if (p != null && Coop.Role == Role.Guest && Coop.HostId == from) Skills.GuestReceivedPersonal(Skills.Unpack(b, 1));
                 break;
             case MsgSkillsSet:    // гость поменял свои навыки — хост запоминает
-                if (p != null && Coop.Role == Role.Host) Skills.SavePersonal(from, Skills.Unpack(b, 1), p.Name);
+                if (p != null && Coop.Role == Role.Host && Mate(from)) Skills.SavePersonal(from, Skills.Unpack(b, 1), p.Name);
                 break;
             case MsgWorldSkills:  // общие навыки мира от хоста
                 if (p != null && Coop.Role == Role.Guest && Coop.HostId == from) { var w = Skills.Unpack(b, 1); Skills.RememberHostWorld(w); Skills.GuestReceivedWorld(w); }
                 break;
             case MsgXp:       // гость заработал опыт → хосту
-                if (p != null && Coop.Role == Role.Host) Plugin.L.LogInfo($"XP: {p.Name} прислал свой опыт — не беру, опыт считает только хост");
+                if (p != null && Coop.Role == Role.Host && b.Length >= 5 && Mate(from))
+                {
+                    // не больше 3000 опыта за 10 с от одного игрока: честная игра столько не даёт
+                    int add = BitConverter.ToInt32(b, 1);
+                    if (Time.unscaledTime - p.XpWindowAt > 10f) { p.XpWindowAt = Time.unscaledTime; p.XpInWindow = 0; }
+                    if (add > 0 && p.XpInWindow + add > 3000) { Plugin.L.LogWarning($"XP: {p.Name} прислал слишком много опыта за 10 с ({p.XpInWindow}+{add}) — не засчитал"); break; }
+                    if (add > 0) p.XpInWindow += add;
+                    Xp.AddFromGuest(add, p.Name);
+                }
                 break;
             case MsgXpTotal:  // хост прислал общий итог
                 if (p != null && Coop.Role == Role.Guest && Coop.HostId == from && b.Length >= 5) Xp.SetTotal(BitConverter.ToInt32(b, 1));
@@ -1160,10 +1529,67 @@ public class NetDriver : MonoBehaviour
                 if (p != null && Coop.Role == Role.Guest && Coop.HostId == from) Sync.SetSteals(Encoding.UTF8.GetString(b, 1, b.Length - 1));
                 break;
             case MsgScored:   // кто-то получил опыт за полку/секцию — у всех она засчитана
-                if (p != null && b.Length >= 6) Xp.MarkScored(b[1], BitConverter.ToInt32(b, 2));
+                if (p != null && b.Length >= 6 && Mate(from)) Xp.MarkScored(b[1], BitConverter.ToInt32(b, 2));
                 break;
             case MsgColors:   // хост раздал цвета
                 if (p != null && Coop.HostId == from && Coop.Role == Role.Guest) OnColors(Encoding.UTF8.GetString(b, 1, b.Length - 1));
+                break;
+            case MsgLogReq:   // друг собирает логи — отдаём свои
+                // логи — только тому, кто со мной в одной аптеке, не чаще раза в 30 с, и я об этом узнаю
+                if (p == null || !Mate(from)) { Plugin.L.LogWarning($"LOGS: {Name(from)} просил логи, но он не в моей аптеке — не отдал"); break; }
+                if (Time.unscaledTime - p.LogGivenAt < 30f) break;
+                p.LogGivenAt = Time.unscaledTime;
+                { var mine = LogCollector.PackMine(); Send(from, MsgLogs, mine, SendReliable); Plugin.L.LogInfo($"LOGS: отдал свои логи {p.Name} ({mine.Length / 1024} КБ)"); }
+                Coop.Say(Loc.L($"{p.Name} собрал логи — твои тоже отправлены ему", $"{p.Name} collected logs — yours were sent too"), 4f);
+                break;
+            case MsgPush:     // меня толкнули
+                if (p == null || !Plugin.PushOn.Value || Coop.State != eGameState.Playing || !Mate(from)) break;
+                {   // толкнуть можно только стоя рядом (с запасом на задержку сети)
+                    var pc = Camera.main; var pr = p.Avatar?.Root;
+                    if (pc == null || pr == null) break;
+                    var gap = pr.transform.position - pc.transform.position; gap.y = 0;
+                    if (gap.magnitude > Push.Range * 2f) { Plugin.L.LogWarning($"PUSH: {p.Name} толкнул издалека ({gap.magnitude:0.0} м) — не засчитал"); break; }
+                }
+                if (Time.unscaledTime - _lastPushedAt < 3f) break;   // не чаще раза в 3 с
+                _lastPushedAt = Time.unscaledTime;
+                {
+                    int n = Sync.LeakyPocket();
+                    Coop.Say(Loc.L($"{p.Name} толкнул тебя!" + (n > 0 ? $" Выронил зелий: {n}" : " Но руки были пустые"), $"{p.Name} shoved you!" + (n > 0 ? $" You dropped {n} potion(s)" : " Your hands were empty")), 4f);
+                    LocalEmoteFlash(3);
+                    Plugin.L.LogInfo($"PUSH: меня толкнул {p.Name}, выпало {n}");
+                    Send(from, MsgPushResult, new[] { (byte)Mathf.Clamp(n, 0, 255) }, SendReliable);   // толкнувшему — чем кончилось
+                }
+                break;
+            case MsgPushResult:   // ответ на мой толчок
+                if (p != null && b.Length >= 2)
+                {
+                    int n = b[1];
+                    Coop.Say(n > 0 ? Loc.L($"{p.Name} выронил зелий: {n}", $"{p.Name} dropped {n} potion(s)") : Loc.L($"У {p.Name} были пустые руки", $"{p.Name}'s hands were empty"), 3f);
+                    Plugin.L.LogInfo($"PUSH: {p.Name} выронил {n}");
+                }
+                break;
+            case MsgLogs:     // пришли логи друга
+                if (p != null && _logWaitUntil > 0 && b.Length > 1 && Mate(from)) { var data = new byte[b.Length - 1]; Buffer.BlockCopy(b, 1, data, 0, data.Length); _guestLogs[p.Name] = data; }
+                break;
+            case MsgMembers:  // хост назвал участников своей аптеки
+                if (p != null && b.Length >= 3)
+                {
+                    int n = BitConverter.ToUInt16(b, 1);
+                    p.Members.Clear();
+                    for (int i = 0; i < n && i < 64 && 3 + 8 * i + 8 <= b.Length; i++) p.Members.Add(BitConverter.ToUInt64(b, 3 + 8 * i));
+                }
+                break;
+            case MsgCfg:      // настройки честности от хоста: у гостя действуют они
+                if (p != null && Coop.Role == Role.Guest && Coop.HostId == from && b.Length >= 13)
+                {
+                    int h = Mathf.Clamp(BitConverter.ToInt32(b, 1), 0, 20), a = Mathf.Clamp(BitConverter.ToInt32(b, 5), 0, 40), e = Mathf.Clamp(BitConverter.ToInt32(b, 9), 1, 1000);
+                    if (!Plugin.HostCfg || h != Plugin.HostHand || a != Plugin.HostApron || e != Plugin.HostPushEvery)
+                        Plugin.L.LogInfo($"COOP: настройки хоста — рука +{h}, фартук +{a}, толчок за {e} склянок (мои: +{Plugin.HandBonus.Value}, +{Plugin.ApronBonus.Value}, {Plugin.PushEvery.Value})");
+                    Plugin.HostHand = h; Plugin.HostApron = a; Plugin.HostPushEvery = e; Plugin.HostCfg = true;
+                }
+                break;
+            case MsgTourney:  // табло соревнования от хоста
+                if (p != null && Coop.Role == Role.Guest && Coop.HostId == from) Tourney.OnBoard(Encoding.UTF8.GetString(b, 1, b.Length - 1));
                 break;
             case MsgHook:     // хост: вот твои склянки с крючка
                 if (p != null && Coop.Role == Role.Guest && Coop.HostId == from && b.Length >= 3)
@@ -1174,13 +1600,20 @@ public class NetDriver : MonoBehaviour
                 }
                 break;
             case MsgMark:     // «я тут»
-                if (p != null) { p.MarkAt = Time.unscaledTime; Coop.Say(Loc.L($"{p.Name} зовёт к себе", $"{p.Name} is calling you over"), 2.5f); }
+                if (p != null && Mate(from)) { p.MarkAt = Time.unscaledTime; Coop.Say(Loc.L($"{p.Name} зовёт к себе", $"{p.Name} is calling you over"), 2.5f); }
                 break;
             case MsgEmote:
-                if (p?.Avatar != null && b.Length >= 3) ApplyEmote(p.Avatar, b[1], b[2]);
+                if (p?.Avatar != null && b.Length >= 3 && Mate(from)) ApplyEmote(p.Avatar, b[1], b[2]);
                 break;
             case MsgMove:
-                if (p != null && p.Proto == Proto && Coop.Role != Role.Solo) Sync.Apply(from, p.Avatar, b, 1);
+                if (p != null && p.Proto == Proto && Coop.Role != Role.Solo && Mate(from))
+                {
+                    // пока я гружу лабораторию, ходы копятся и применяются после загрузки (раньше применялись к неготовым склянкам и терялись)
+                    if (!SyncLive)
+                    { if (_lateMoves.Count < 5000) _lateMoves.Enqueue((from, b)); break; }
+                    FlushLateMoves();
+                    Sync.Apply(from, p.Avatar, b, 1);
+                }
                 break;
             case MsgRoom:
                 if (p != null && b.Length >= 2)
@@ -1189,7 +1622,8 @@ public class NetDriver : MonoBehaviour
                     if (p.Hosting && b.Length > 2)
                     {
                         var info = Encoding.UTF8.GetString(b, 2, b.Length - 2).Split('\t');
-                        p.RoomId = info[0]; p.RoomName = info.Length > 1 ? info[1] : "";
+                        // имена приходят по сети и попадают в пути файлов — чистим (без слэшей, двоеточий и «..»)
+                        p.RoomId = SafeNetName(info[0]); p.RoomName = info.Length > 1 ? SafeNetName(info[1]) : "";
                         if (Coop.Role == Role.Guest && Coop.HostId == from && (Coop.RoomId != p.RoomId || Coop.RoomName != p.RoomName))
                         { Coop.RoomId = p.RoomId; Coop.RoomName = p.RoomName; Plugin.L.LogInfo($"COOP: аптека хоста — «{p.RoomName}» ({p.RoomId})"); }
                     }
@@ -1201,6 +1635,10 @@ public class NetDriver : MonoBehaviour
             case MsgSaveReq:
                 if (p == null) break;
                 if (Coop.Role != Role.Host) { Plugin.L.LogWarning($"COOP: {p.Name} просится в аптеку, но я не хост"); break; }
+                if (_guestsRoom != Coop.RoomId) { _guests.Clear(); _guestsRoom = Coop.RoomId; }
+                if (_guests.Add(from)) Plugin.L.LogInfo($"COOP: {p.Name} — участник аптеки «{Coop.RoomName}» (всего гостей: {_guests.Count})");
+                SendMembers();
+                if (Tourney.On) { Tourney.AssignTeams(_me, RoomPeers()); BroadcastColors(); }
                 Sync.FlushSave();   // последние ходы (в том числе гостей) — сначала на диск
                 var pack = Coop.PackHostSave();
                 if (pack == null) { Plugin.L.LogError("COOP: нечего отправить — сейв не найден"); break; }
@@ -1211,10 +1649,19 @@ public class NetDriver : MonoBehaviour
                 if (p == null || Coop.Role != Role.Guest || Coop.HostId != from) break;
                 try
                 {
+                    // сначала дописываем текущий сейв (он мог смотреть в ту же гостевую папку), потом распаковываем сейв хоста
+                    if (SaveSwitch.Enabled && Coop.InLobby) SaveSwitch.SaveCurrent();
                     Coop.UnpackToGuestDir(b, 1);
-                    _joinStatus = Loc.L($"Перезапускаю игру, чтобы зайти в аптеку {Coop.HostName}…", $"Restarting the game to join {Coop.HostName}'s pharmacy…");
-                    Coop.Say(_joinStatus, 10f);
-                    Coop.RelaunchAsGuest(from, Coop.HostName);
+                    if (SaveSwitch.Enabled && Coop.InLobby && SaveSwitch.To(Coop.GuestDir, false, saveFirst: false))
+                    {
+                        Coop.AutoJoin = true; Coop.AutoJoinSince = 0;
+                        Plugin.L.LogInfo($"COOP: захожу к {Coop.HostName} без перезапуска");
+                        break;
+                    }
+                    var hostId = from; var hostName = Coop.HostName;
+                    AskRestart(Loc.L($"Без перезапуска не вышло. Перезапустить игру и зайти к {hostName}?", $"Couldn't switch in place. Restart the game and join {hostName}?"),
+                        () => { MenuButtons.CloseScreen(); Coop.Say(Loc.L($"Перезапускаю игру, чтобы зайти в аптеку {hostName}…", $"Restarting the game to join {hostName}'s pharmacy…"), 10f); Coop.RelaunchAsGuest(hostId, hostName); },
+                        () => { Coop.Role = Role.Solo; OpenCoopScreen(); });
                 }
                 catch (Exception e) { _joinStatus = Loc.L("Не удалось принять сейв: ", "Couldn't receive the save: ") + e.Message; Plugin.L.LogError("COOP: " + e); Coop.Role = Role.Solo; }
                 break;
@@ -1226,6 +1673,7 @@ public class NetDriver : MonoBehaviour
     void OnGUI()
     {
         if (!_ready) return;
+        Loc.Poll();
         try
         {
             if (_tagStyle == null)
@@ -1253,10 +1701,16 @@ public class NetDriver : MonoBehaviour
             if (Coop.Banner != null && Time.unscaledTime < Coop.BannerUntil)
             {
                 var r = new Rect(Screen.width / 2f - 360, Screen.height * 0.18f, 720, 64);
+                // в стиле игры: её панель и её шрифт; если не нашлись — старая плашка
+                if (!Coop.InLobby && Sigils.FontReady && Sigils.WantSprite("banner_bg", "panel-modal", Color.white, r.center.x, r.center.y, r.width, r.height, 0f, back: true, center: true))
+                    Sigils.WantText("banner", Coop.Banner, new Color(1f, 0.9f, 0.6f), r.center.x, r.y + 16, 24, center: true, width: r.width - 40);
+                else
+                {
                 GUI.Box(r, GUIContent.none, _banner);
                 _hudStyle.alignment = TextAnchor.MiddleCenter; _hudStyle.fontSize = 17; _hudStyle.wordWrap = true;
                 Shadowed(new Rect(r.x + 16, r.y, r.width - 32, r.height), Coop.Banner, _hudStyle, new Color(1f, 0.9f, 0.6f));
                 _hudStyle.alignment = TextAnchor.UpperLeft; _hudStyle.fontSize = 14; _hudStyle.wordWrap = false;
+                }
             }
             if (Modifiers.Tired && !Coop.InLobby)
             {
@@ -1280,12 +1734,29 @@ public class NetDriver : MonoBehaviour
                 Shadowed(new Rect(sx - 120, sy - 14, 240, 28), av.Name, _tagStyle, av.CurrentColor);
                 EmoteBubble(av.EmoteId, av.EmoteStart, sx, sy - 70);
             }
+            // подписи над фартуками на крючке — только вблизи
+            foreach (var v in Sync.Viz)
+            {
+                if ((cam.transform.position - v.Top).sqrMagnitude > 12f * 12f) continue;
+                var vp = cam.WorldToScreenPoint(v.Top);
+                if (vp.z <= 0) continue;
+                Shadowed(new Rect(vp.x - 140, Screen.height - vp.y - 14, 280, 28), Loc.L($"Фартук {v.Name}", $"{v.Name}'s apron"), _tagStyle, Color.white);
+            }
             foreach (var pr in _peers.Values) if (pr.Avatar != null && Time.unscaledTime - pr.MarkAt < 6f) DrawMark(cam, pr.Avatar, pr.MarkAt);
             if (Time.unscaledTime - _selfEmoteAt < 2.6f) EmoteBubble(_selfEmote, _selfEmoteAt, Screen.width / 2f, 110);
             if (_wheelOpen) DrawWheel();
             Letter.DrawFallback();
+            Tourney.Draw();
+            Push.Draw();
+            DrawModMenu();
+            DrawCurseTimer();
         }
-        catch (Exception e) { Plugin.L.LogError("OnGUI: " + e.Message); }
+        catch (Exception e)
+        {
+            // OnGUI зовётся каждый кадр — одну и ту же ошибку пишем один раз, а не 150 тысяч
+            var msg = e.Message;
+            if (_guiErrors.Add(msg)) Plugin.L.LogError("OnGUI: " + e);
+        }
     }
 
     // Метка «я тут»: пульсирует над аптекарем; если он за краем экрана — стрелка по краю с именем и расстоянием
@@ -1315,6 +1786,29 @@ public class NetDriver : MonoBehaviour
             label = $"{arrow}\n{av.Name} · {dist:0} {Loc.L("м", "m")}";
         }
         else label = $"▼\n{av.Name} · {dist:0} {Loc.L("м", "m")}";
+        // стрелка-шеврон из обучения игры + подпись её шрифтом; не нашлось — старая табличка
+        if (Sigils.FontReady)
+        {
+            float bob = Mathf.Sin(a * 6f) * 6f;
+            float ang;
+            Vector2 d2;
+            if (off)
+            {
+                var center = new Vector2(Screen.width / 2f, Screen.height / 2f);
+                d2 = (new Vector2(x, y) - center).normalized;
+                ang = Mathf.Atan2(d2.x, d2.y) * Mathf.Rad2Deg;   // шеврон нарисован «вниз»: 0° — вниз по экрану
+            }
+            else { d2 = Vector2.up; ang = 0f; }
+            var cc = c; cc.a = fade;
+            bool okPic = Sigils.WantSprite("mark_" + av.Name, "chevron-down", cc, x - d2.x * bob, y - d2.y * bob - (off ? 0 : 20), 46, 46, -ang);
+            if (okPic)
+            {
+                float ty = off ? y - d2.y * 46 - 10 : y + 10;
+                Sigils.WantText("markt_" + av.Name, $"{av.Name} · {dist:0} {Loc.L("м", "m")}", new Color(1, 1, 1, fade), x - d2.x * 60, ty, 20, center: true);
+                GUI.color = old;
+                return;
+            }
+        }
         float pulse = 1f + 0.15f * Mathf.Sin(a * 8f);
         float w = 220, h = 70 * pulse;
         GUI.color = new Color(1, 1, 1, fade);
@@ -1355,8 +1849,10 @@ public class NetDriver : MonoBehaviour
             bool sel = i == _wheelSel;
             GUI.color = Color.white;
             var r = new Rect(x - s / 2, y - s / 2, s, s);
-            GUI.Box(r, GUIContent.none, sel ? _bubbleSel : _bubble);
-            GUI.color = i < 8 ? EmoCol[i] : new Color(0.23f, 0.16f, 0.12f, 1f);
+            // плитки как на доске навыков игры; не нашлись — старые кружки
+            if (!(Sigils.Ready && Sigils.WantSprite("wheel_" + i, sel ? "node-tile-owned" : "node-tile-available", Color.white, x, y, sel ? s + 10 : s, sel ? s + 10 : s, 0f, back: true)))
+                GUI.Box(r, GUIContent.none, sel ? _bubbleSel : _bubble);
+            GUI.color = i < 8 ? EmoCol[i] : (Sigils.Ready ? new Color(1f, 0.92f, 0.75f, 1f) : new Color(0.23f, 0.16f, 0.12f, 1f));
             _wheelStyle.fontSize = i < 8 ? 34 : 18;
             GUI.Label(r, labels[i], _wheelStyle);
         }
@@ -1381,18 +1877,18 @@ public class NetDriver : MonoBehaviour
         float w = 480, h = 52 + 48 * shown + 56 + 48, x = (Screen.width - w) / 2, y = (Screen.height - h) / 2;
         GUI.Box(new Rect(x, y, w, h), GUIContent.none, _banner);
         _hudStyle.fontSize = 20; _hudStyle.alignment = TextAnchor.MiddleCenter;
-        Shadowed(new Rect(x, y + 10, w, 32), "Какую аптеку открыть?", _hudStyle, new Color(1f, 0.9f, 0.6f));
+        Shadowed(new Rect(x, y + 10, w, 32), Loc.L("Какую аптеку открыть?", "Which pharmacy to open?"), _hudStyle, new Color(1f, 0.9f, 0.6f));
         _hudStyle.fontSize = 14; _hudStyle.alignment = TextAnchor.UpperLeft;
         float cy = y + 52;
         for (int i = 0; i < shown; i++, cy += 48)
-            if (MBtn(new Rect(x + 20, cy, w - 40, 40), $"{i + 1}. Аптека «{rooms[i]}»")) { _roomPicker = false; Coop.RelaunchAsHost(rooms[i]); }
+            if (MBtn(new Rect(x + 20, cy, w - 40, 40), Loc.L($"{i + 1}. Аптека «{rooms[i]}»", $"{i + 1}. Pharmacy \"{rooms[i]}\""))) { _roomPicker = false; Coop.RelaunchAsHost(rooms[i]); }
 
         // своё поле ввода: кликнул — печатаешь (буквы ловит TickTyping), Enter — создать, Esc — перестать печатать
         string caret = _typingRoom && (Time.unscaledTime * 2f % 2f) < 1f ? "|" : "";
-        string shownName = _newRoomName.Length == 0 && !_typingRoom ? "название…" : _newRoomName + caret;
+        string shownName = _newRoomName.Length == 0 && !_typingRoom ? Loc.L("название…", "name…") : _newRoomName + caret;
         if (MBtn(new Rect(x + 20, cy + 8, w - 190, 40), shownName)) _typingRoom = true;
-        if (MBtn(new Rect(x + w - 160, cy + 8, 140, 40), "+ Новая")) { _typingRoom = false; CreateRoom(rooms, false); }
-        if (MBtn(new Rect(x + 20, y + h - 46, w - 40, 36), "Отмена")) { _typingRoom = false; _roomPicker = false; }
+        if (MBtn(new Rect(x + w - 160, cy + 8, 140, 40), Loc.L("+ Новая", "+ New"))) { _typingRoom = false; CreateRoom(rooms, false); }
+        if (MBtn(new Rect(x + 20, y + h - 46, w - 40, 36), Loc.L("Отмена", "Cancel"))) { _typingRoom = false; _roomPicker = false; }
     }
 
     void CreateRoom(string[] rooms, bool fromMySave)
@@ -1400,15 +1896,33 @@ public class NetDriver : MonoBehaviour
         var name = Coop.SafeRoomName(_newRoomName);
         if (Array.IndexOf(rooms, name) >= 0) { Coop.Say(Loc.L($"Аптека «{name}» уже есть — придумай другое название", $"Pharmacy \"{name}\" already exists — pick another name"), 3f); return; }
         _roomPicker = false;
-        // аптеку создаём только после «Да» — на «Отмена» ничего не остаётся
-        AskRestart(Loc.L($"Игра перезапустится. Создать «{name}»?", $"The game will restart. Create \"{name}\"?"), () =>
+        if (fromMySave && !Coop.CreateRoomFromMySave(name)) { Coop.Say(Loc.L("Не нашёл твой личный сейв — начни новую аптеку", "Couldn't find your own save — start a new pharmacy"), 5f); return; }
+        if (!fromMySave) Coop.MarkFresh(name);
+        Coop.EnsureRoomId(name);
+        Plugin.L.LogInfo($"COOP: создана аптека «{name}»" + (fromMySave ? " из личного сейва" : ""));
+        OpenRoom(name, !fromMySave);
+    }
+
+    // Открыть аптеку хостом: сначала прямо в меню (без перезапуска), не вышло — спросить и перезапустить
+    void OpenRoom(string name, bool fresh)
+    {
+        if (SaveSwitch.Enabled && Coop.InLobby)
         {
-            if (fromMySave && !Coop.CreateRoomFromMySave(name)) { Coop.Say(Loc.L("Не нашёл твой личный сейв — начни новую аптеку", "Couldn't find your own save — start a new pharmacy"), 5f); OpenCoopScreen(); return; }
-            if (!fromMySave) Coop.MarkFresh(name);
-            Coop.EnsureRoomId(name);
-            MenuButtons.CloseScreen();
-            Coop.RelaunchAsHost(name);
-        }, OpenCoopScreen);
+            string oldName = Coop.RoomName, oldId = Coop.RoomId;
+            Coop.RoomName = name; Coop.RoomId = Coop.EnsureRoomId(name);
+            var dir = Path.Combine(Coop.RoomsRoot, name, "save");
+            if (SaveSwitch.To(dir, fresh))
+            {
+                MenuButtons.CloseScreen();
+                _typingRoom = false;   // экран закрыт — печатать название больше не надо (иначе T, G/F2, F8, H в игре мертвы)
+                Coop.AutoHost = true; Coop.AutoHostSince = 0;
+                Plugin.L.LogInfo($"COOP: открываю аптеку «{name}» без перезапуска");
+                return;
+            }
+            Coop.RoomName = oldName; Coop.RoomId = oldId;
+        }
+        AskRestart(Loc.L($"Без перезапуска не вышло. Перезапустить игру и открыть «{name}»?", $"Couldn't switch in place. Restart the game and open \"{name}\"?"),
+            () => { MenuButtons.CloseScreen(); Coop.RelaunchAsHost(name); }, OpenCoopScreen);
     }
 
     // Панель в главном меню: создать комнату или зайти к другу
@@ -1417,7 +1931,7 @@ public class NetDriver : MonoBehaviour
         var hosts = _peers.Where(kv => kv.Value.Hosting).ToList();
         int rows = 1 + hosts.Count + (_joinStatus != null ? 1 : 0);
         float w = 420, h = 54 * rows + 70, x = Screen.width - w - 24, y = 24;
-        GUI.Box(new Rect(x, y, w, h), "Общая аптека", _boxStyle);
+        GUI.Box(new Rect(x, y, w, h), Loc.L("Общая аптека", "Shared pharmacy"), _boxStyle);
         float cy = y + 34;
 
         if (_joinStatus != null)
@@ -1434,7 +1948,7 @@ public class NetDriver : MonoBehaviour
             if (MBtn(new Rect(x + 16, cy, w - 32, 44), (kv.Value.RoomName != "" ? $"Зайти: {kv.Value.Name} · «{kv.Value.RoomName}»" : $"Зайти в аптеку {kv.Value.Name}") + "  [F8]")) { Plugin.L.LogInfo("COOP: клик «Зайти»"); JoinHost(kv.Key); }
             cy += 54;
         }
-        GUI.Label(new Rect(x + 16, cy, w - 32, 22), "Если кнопки не жмутся мышкой — жми F7 / F8", _hudStyle);
+        GUI.Label(new Rect(x + 16, cy, w - 32, 22), Loc.L("Если кнопки не жмутся мышкой — жми F7 / F8", "If the buttons don't respond to the mouse — press F7 / F8"), _hudStyle);
     }
 
     static void Shadowed(Rect r, string text, GUIStyle st, Color c)

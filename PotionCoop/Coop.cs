@@ -137,6 +137,30 @@ public static class Coop
         catch { return Array.Empty<string>(); }
     }
 
+    // ---- страховка общих аптек: копия сейва аптеки при каждом её открытии хостом (последние 5) ----
+    // Личный сейв копировался всегда, а аптека с десятками часов — нет: один сбой или вредный гость, и её не вернуть.
+    public static string RoomBackupRoot => Path.Combine(Application.persistentDataPath, "PotionCoop_backup_rooms");
+    public static void BackupRoom()
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(RoomName)) return;
+            var src = Path.Combine(RoomsRoot, RoomName, "save");
+            if (!Directory.Exists(src) || Directory.GetFiles(src).Length == 0) return;   // новая аптека — копировать нечего
+            var root = Path.Combine(RoomBackupRoot, RoomName);
+            var to = Path.Combine(root, DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss"));
+            Directory.CreateDirectory(to);
+            int n = 0;
+            foreach (var f in Directory.GetFiles(src)) { File.Copy(f, Path.Combine(to, Path.GetFileName(f)), true); n++; }
+            // рядом лежащие файлы аптеки (команды, счёт, навыки игроков) — тоже
+            foreach (var f in Directory.GetFiles(Path.Combine(RoomsRoot, RoomName))) { File.Copy(f, Path.Combine(to, "_room_" + Path.GetFileName(f)), true); n++; }
+            var old = Directory.GetDirectories(root).OrderByDescending(d => d).Skip(5).ToList();
+            foreach (var d in old) { try { Directory.Delete(d, true); } catch { } }
+            Plugin.L.LogInfo($"BACKUP: копия аптеки «{RoomName}» -> {to} (файлов {n}, храню последние 5)");
+        }
+        catch (Exception e) { Plugin.L.LogWarning("BACKUP: копия аптеки не удалась: " + e.Message); }
+    }
+
     public static string SafeRoomName(string n)
     {
         n = (n ?? "").Trim();
@@ -300,24 +324,37 @@ public static class Coop
         return ms.ToArray();
     }
 
+    // ограничения на присланный сейв: чужой хост не должен завалить диск или подсунуть посторонние файлы
+    const int MaxSaveBytes = 32 * 1024 * 1024, MaxSaveFiles = 64, MaxFileBytes = 16 * 1024 * 1024;
+    static readonly System.Text.RegularExpressions.Regex SaveName =
+        new(@"^[A-Za-z0-9_\-]{1,64}(\.[A-Za-z0-9]{1,8})?$", System.Text.RegularExpressions.RegexOptions.Compiled);   // простое имя файла сейва, без путей и хитростей
+
     public static int UnpackToGuestDir(byte[] b, int offset)
     {
+        if (b.Length - offset > MaxSaveBytes) throw new Exception($"сейв хоста слишком большой ({(b.Length - offset) / 1024 / 1024} МБ)");
+        // сначала читаем и проверяем всё, и только потом трогаем папку
+        var files = new List<(string name, byte[] data)>();
+        using (var ms = new MemoryStream(b, offset, b.Length - offset))
+        using (var r = new BinaryReader(ms, Encoding.UTF8))
+        {
+            int n = r.ReadInt32();
+            if (n < 0 || n > MaxSaveFiles) throw new Exception($"в сейве хоста странное число файлов: {n}");
+            for (int i = 0; i < n && ms.Position < ms.Length; i++)
+            {
+                var name = Path.GetFileName(r.ReadString()); // только имя, без путей
+                int len = r.ReadInt32();
+                if (len < 0 || len > MaxFileBytes || len > ms.Length - ms.Position) throw new Exception($"файл «{name}» в сейве хоста битый или слишком большой");
+                var data = r.ReadBytes(len);
+                if (!SaveName.IsMatch(name)) { Plugin.L.LogWarning($"COOP: в сейве хоста посторонний файл «{name}» — пропускаю"); continue; }
+                files.Add((name, data));
+            }
+        }
         var dir = GuestDir;
         if (Directory.Exists(dir)) Directory.Delete(dir, true);
         Directory.CreateDirectory(dir);
-        using var ms = new MemoryStream(b, offset, b.Length - offset);
-        using var r = new BinaryReader(ms, Encoding.UTF8);
-        int n = r.ReadInt32(), written = 0;
-        for (int i = 0; i < n && ms.Position < ms.Length; i++)
-        {
-            var name = Path.GetFileName(r.ReadString()); // только имя, без путей
-            int len = r.ReadInt32();
-            var data = r.ReadBytes(len);
-            File.WriteAllBytes(Path.Combine(dir, name), data);
-            written++;
-        }
-        Plugin.L.LogInfo($"COOP: сейв хоста разложен в {dir} ({written} файлов)");
-        return written;
+        foreach (var (name, data) in files) File.WriteAllBytes(Path.Combine(dir, name), data);
+        Plugin.L.LogInfo($"COOP: сейв хоста разложен в {dir} ({files.Count} файлов)");
+        return files.Count;
     }
 
     // ---- запустить «Продолжить» так же, как если бы игрок нажал кнопку ----
@@ -347,6 +384,8 @@ static class CoopPatches
     {
         Coop.Machine = __instance;
         Coop.State = id;
+        Plugin.L.LogInfo($"STATE: {id} (роль {Coop.Role}{(Coop.AutoHost ? ", открываю аптеку" : "")})");
+        if (Tourney.On && (id == eGameState.IntroLetter || id == eGameState.Playing || id == eGameState.NewGame)) TourneyIntro.OnState(id);
         if (id == eGameState.Lobby) { Coop.BackupPersonalSave(); Coop.MigrateMySave(); Loc.Detect(); }
         if (id == eGameState.Playing) LabScout.Report();
         NetDriver.I?.OnGameState(id);
@@ -365,8 +404,10 @@ static class CoopPatches
             if ((id == eGameState.ContinueGame || id == eGameState.NewGame) && Coop.RedirectSaves && Coop.Role == Role.Solo && !Coop.AutoJoin && !Coop.AutoHost)
             {
                 bool cont = id == eGameState.ContinueGame;
+                // сначала пробуем вернуть личный сейв прямо здесь — тогда игра просто продолжит
+                if (SaveSwitch.To(null, false)) return true;
                 if (NetDriver.I != null)
-                    NetDriver.I.AskRestart(Loc.L("Игра перезапустится. Вернуться в свою игру?", "The game will restart. Back to your own game?"),
+                    NetDriver.I.AskRestart(Loc.L("Без перезапуска не вышло. Перезапустить игру и вернуться в свою?", "Couldn't switch in place. Restart the game and go back to your own?"),
                         () => { MenuButtons.CloseScreen(); Coop.RelaunchSolo(cont); }, null);
                 else Coop.RelaunchSolo(cont);
                 return false;

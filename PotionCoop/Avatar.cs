@@ -21,9 +21,10 @@ public class Avatar
     public static readonly string[] ColorNamesEn = {
         "Teal", "Plum", "Mustard", "Brick", "Cornflower", "Grass",
         "Pink", "Mint", "Orange", "Charcoal", "White", "Chocolate" };
-    public static string ColorName(int i) => i < 0 ? (Loc.Ru ? "сам подберу" : "auto") : (Loc.Ru ? ColorNames : ColorNamesEn)[i % 12];
+    public static string ColorName(int i) => i < 0 ? Loc.L("сам подберу", "auto") : (Loc.Ru ? ColorNames[i % 12] : Loc.Tr(ColorNamesEn[i % 12]));
 
-    public Vector3 SpawnEye;   // где аптекарь впервые появился — там висит его «фартук на крючке»
+    public Vector3 SpawnEye; public float SpawnYaw;
+    public int ColorIndex => _colorIndex;   // где аптекарь впервые появился — там висит его «фартук на крючке»
     public bool HasSpawn;
 
     public const float EyeHeight = 1.43f;   // высота глаз модели при масштабе 1
@@ -58,7 +59,7 @@ public class Avatar
     {
         _targetPos = eyePos; _targetYaw = yaw; _targetPitch = pitch;
         LastSeen = Time.unscaledTime;
-        if (!HasSpawn) { SpawnEye = eyePos; HasSpawn = true; }
+        if (!HasSpawn) { SpawnEye = eyePos; SpawnYaw = yaw; HasSpawn = true; }
         if (!_hasTarget) { _pos = eyePos; _yaw = yaw; _pitch = pitch; _hasTarget = true; Root.SetActive(true); }
     }
 
@@ -364,6 +365,54 @@ public class Avatar
         return go.transform;
     }
 
+    // «Фартук на крючке»: крючок в стене, фартук цвета аптекаря, склянки — в кармашках на фартуке.
+    // Возвращает корень и места для склянок (в мировых координатах).
+    public static GameObject BuildHook(Vector3 hookPos, float yaw, int colorIndex, int count, out Vector3[] slots)
+    {
+        var root = new GameObject("PotionCoop_Hook");
+        root.transform.SetPositionAndRotation(hookPos, Quaternion.Euler(0, yaw, 0));
+        var metal = NewMat(new Color(0.18f, 0.16f, 0.14f), 0.8f, 0.5f);
+        int ci = ((colorIndex % Robe.Length) + Robe.Length) % Robe.Length;
+        var cloth = NewMat(Robe[ci]);
+        var dark = NewMat(RobeDark[ci]);
+        // крючок: штырь из стены (сзади) и загиб вверх
+        var peg = Part(root.transform, "peg", Capsule(0.018f, 0.14f), metal);
+        peg.localPosition = new Vector3(0, 0, -0.14f); peg.localRotation = Quaternion.Euler(-90, 0, 0);
+        var tip = Part(root.transform, "tip", Capsule(0.016f, 0.05f), metal);
+        tip.localPosition = new Vector3(0, 0.05f, 0);
+        // лямка: две полоски от крючка к углам фартука
+        float w = 0.42f, rows = Mathf.Max(2, Mathf.CeilToInt(count / 2f)), h = 0.2f + 0.13f * rows;
+        var l1 = Part(root.transform, "strapL", Capsule(0.012f, 0.2f), dark); l1.localRotation = Quaternion.Euler(0, 0, -38); 
+        var l2 = Part(root.transform, "strapR", Capsule(0.012f, 0.2f), dark); l2.localRotation = Quaternion.Euler(0, 0, 38);
+        // сам фартук — плоская ткань с «карманами»-полосками
+        var apron = Part(root.transform, "apron", Quad(w, h), cloth, twoSided: true);
+        apron.localPosition = new Vector3(0, -0.16f, 0.02f);
+        for (int r = 0; r < rows; r++)
+        {
+            var pocket = Part(root.transform, "pocket" + r, Quad(w * 0.9f, 0.05f), dark, twoSided: true);
+            pocket.localPosition = new Vector3(0, -0.16f - 0.13f - 0.13f * r + 0.03f, 0.035f);
+        }
+        slots = new Vector3[count];
+        for (int i = 0; i < count; i++)
+        {
+            int r = i / 2, c = i % 2;
+            var local = new Vector3(count == 1 ? 0 : (c == 0 ? -0.1f : 0.1f), -0.16f - 0.1f - 0.13f * r, 0.07f);
+            slots[i] = root.transform.TransformPoint(local);
+        }
+        return root;
+    }
+
+    // прямоугольник ткани: верхний край — в точке (0,0), висит вниз
+    static Mesh Quad(float w, float h)
+    {
+        var m = new Mesh();
+        m.vertices = new[] { new Vector3(-w / 2, 0, 0), new Vector3(w / 2, 0, 0), new Vector3(w / 2, -h, 0), new Vector3(-w / 2, -h, 0) };
+        m.triangles = new[] { 0, 2, 1, 0, 3, 2 };
+        m.uv = new[] { new Vector2(0, 1), new Vector2(1, 1), new Vector2(1, 0), new Vector2(0, 0) };
+        m.RecalculateNormals(); m.RecalculateBounds();
+        return m;
+    }
+
     static Transform Part(Transform parent, string name, Mesh mesh, Material mat, bool twoSided = false)
     {
         var go = new GameObject(name);
@@ -380,7 +429,7 @@ public class Avatar
     static Material _template;
     static readonly Dictionary<IntPtr, Material> _twoSided = new();
 
-    static Material NewMat(Color c, float metal = 0f, float smooth = 0.25f)
+    public static Material NewMat(Color c, float metal = 0f, float smooth = 0.25f)
     {
         if (_template == null) _template = FindTemplate();
         var m = new Material(_template);

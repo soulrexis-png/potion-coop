@@ -31,11 +31,12 @@ public static class Modifiers
     public static void HostTick(System.Collections.Generic.IList<ulong> players, Action<byte, ulong, bool> send)
     {
         if (Coop.Role != Role.Host || Coop.State != eGameState.Playing || Paused) return;
+        if (Tourney.On && !Tourney.Started) return;   // пока ждём старта соревнования — никаких событий
         var enabled = new System.Collections.Generic.List<byte>();
         if (Plugin.ModFatigue.Value) enabled.Add(Fatigue);
         if (Plugin.ModLeaky.Value) enabled.Add(Leaky);
         if (Plugin.ModQuake.Value) enabled.Add(Quake);
-        // Дальтоник-дух пока не работает (цвета не меняются) — в случайные события не берём, пока не починим
+        if (Plugin.ModBlind.Value) enabled.Add(Blind);
         if (enabled.Count == 0) return;
         float now = Time.unscaledTime;
         if (_nextRoll == 0) { _nextRoll = now + Next(); return; }

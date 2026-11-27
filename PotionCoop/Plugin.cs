@@ -11,12 +11,13 @@ using CodeBase.Services.UndoService;
 
 namespace PotionCoop;
 
-[BepInPlugin("roma.potioncoop", "PotionCoop", "0.0.29")]
+[BepInPlugin("roma.potioncoop", "PotionCoop", "0.0.61")]
 public class Plugin : BasePlugin
 {
     internal static ManualLogSource L;
     internal static ConfigEntry<float> AvatarScale;
     internal static ConfigEntry<int> AvatarColor;
+    internal static ConfigEntry<bool> NoRestart;
     internal static ConfigEntry<int> HandBonus, ApronBonus;
     internal static ConfigEntry<bool> ModFatigue;
     internal static ConfigEntry<bool> ModBreak;
@@ -24,12 +25,22 @@ public class Plugin : BasePlugin
     internal static ConfigEntry<string> ModBlindMode;
     internal static ConfigEntry<float> ModBreakChance;
     internal static ConfigEntry<float> ModEveryMin, ModEveryMax;
+    internal static ConfigEntry<bool> PushOn;
+    internal static ConfigEntry<int> PushEvery;
+    internal static ConfigEntry<bool> StrictRooms;
+    // Настройки, от которых зависит честность. У гостя действуют значения хоста (MsgCfg), а не его собственный конфиг.
+    internal static bool HostCfg; internal static int HostHand, HostApron, HostPushEvery = 8;
+    internal static bool UseHostCfg => HostCfg && Coop.Role == Role.Guest;
+    internal static int EffHand => System.Math.Max(0, UseHostCfg ? HostHand : HandBonus.Value);
+    internal static int EffApron => System.Math.Max(0, UseHostCfg ? HostApron : ApronBonus.Value);
+    internal static int EffPushEvery => System.Math.Max(1, UseHostCfg ? HostPushEvery : PushEvery.Value);
 
     public override void Load()
     {
         L = Log;
         Coop.CheckJoinFlag();
         AvatarScale = Config.Bind("Avatar", "Size", 0.75f, "Размер аптекарей других игроков (1 = как в превью) / Size of other players' apothecaries (1 = preview size)");
+        NoRestart = Config.Bind("Rooms", "SwitchWithoutRestart", true, "Переключать аптеки прямо в меню, без перезапуска игры (если не выйдет — перезапуск) / Switch pharmacies right in the menu without restarting the game (falls back to a restart)");
         AvatarColor = Config.Bind("Avatar", "Color", -1, "Какой цвет аптекаря хочу (0–11, -1 — любой свободный). Меняется кнопкой «Мой цвет» в «Общих аптеках» / Apothecary colour I want (0–11, -1 = any free one). Changed with \"My color\" under Shared pharmacies");
         if (UnityEngine.Mathf.Abs(AvatarScale.Value - 0.85f) < 0.001f) AvatarScale.Value = 0.75f;   // старое значение по умолчанию → на 12% меньше
         ModBreak = Config.Bind("Modifiers", "FragileFlasks", true, "Хрупкие склянки: брошенная склянка может разбиться, зелье разольётся по соседним колбам (решает хост) / Fragile flasks: a thrown flask may break and spill into neighbours (host decides)");
@@ -37,11 +48,14 @@ public class Plugin : BasePlugin
         ModFatigue = Config.Bind("Modifiers", "Fatigue", true, "Переутомление: часть игроков замедляется, лечится котом (решает хост) / Exhaustion: some players slow down until they pet the cat (host decides)");
         ModLeaky = Config.Bind("Modifiers", "LeakyPocket", true, "Дырявый карман: у случайного игрока из рук выпадает 1–2 зелья (решает хост) / Leaky pocket: a random player drops 1–2 potions (host decides)");
         ModQuake = Config.Bind("Modifiers", "Earthquake", true, "Землетрясение: зелья на полу и неготовых полках разлетаются (решает хост) / Earthquake: potions on the floor and unfinished shelves go flying (host decides)");
-        ModBlind = Config.Bind("Modifiers", "ColorBlindSpirit", true, "Дальтоник-дух: на минуту портит цвета жидкостей у одного игрока (решает хост) / Colour-blind spirit (not working yet)");
+        ModBlind = Config.Bind("Modifiers", "ColorBlindSpirit", true, "Дальтоник-дух: на минуту портит цвета жидкостей у одного игрока (решает хост) / Colour-blind spirit: spoils one player's liquid colours for a minute (host decides)");
+        PushOn = Config.Bind("Perks", "Shove", true, "Толчок: за правильно поставленные склянки копится заряд, H — у игрока рядом выпадают зелья / Shove: correct shelvings charge it, H makes a nearby player drop potions");
+        PushEvery = Config.Bind("Perks", "ShoveEvery", 8, "Сколько склянок нужно для заряда толчка / Correct shelvings needed to charge the shove");
         ModBlindMode = Config.Bind("Modifiers", "ColorBlindMode", "fade", "Как портит: fade — цвета блёкнут почти до серого; shuffle — цвета семейств перепутаны / How the spirit spoils colours: fade or shuffle");
         ModEveryMin = Config.Bind("Modifiers", "EveryMinutesMin", 4f, "Как часто хост насылает модификатор: от (минут) / How often the host sends a modifier: from (minutes)");
         ModEveryMax = Config.Bind("Modifiers", "EveryMinutesMax", 8f, "...до (минут) / ...to (minutes)");
         HandBonus = Config.Bind("Buffs", "HandExtra", 0, "Сколько склянок добавить к руке (0 — как в игре). Ставь одинаково у всех, иначе нечестно / Extra hand slots (0 = as in the game). Set the same for everyone");
+        StrictRooms = Config.Bind("Rooms", "StrictRooms", true, "Игровые сообщения (ходы, положение, толчки, логи) — только между участниками одной аптеки. Выключать только для отладки и сразу у всех / Game messages only between members of the same pharmacy. Turn off for debugging only, for everyone at once");
         ApronBonus = Config.Bind("Buffs", "ApronExtra", 0, "Сколько склянок добавить к фартуку (0 — как в игре) / Extra apron slots (0 = as in the game)");
         if (VersionGuard.Check())
         {
@@ -57,11 +71,13 @@ public class Plugin : BasePlugin
         try { harmony.PatchAll(typeof(UndoPatches)); } catch (System.Exception e) { L.LogWarning("UNDO patches: " + e.Message); }
         try { harmony.PatchAll(typeof(SkillCostPatches)); } catch (System.Exception e) { L.LogWarning("SKILL cost patches: " + e.Message); }
         try { harmony.PatchAll(typeof(ColorCursePatches)); } catch (System.Exception e) { L.LogWarning("COLOR patches: " + e.Message); }
-        try { harmony.PatchAll(typeof(CapacityPatches)); } catch (System.Exception e) { L.LogWarning("CAPACITY patches: " + e.Message); }
+        try { CapacityPatches.Apply(harmony); } catch (System.Exception e) { L.LogWarning("CAPACITY patches: " + e.Message); }
+        try { harmony.PatchAll(typeof(SwitchPatches)); } catch (System.Exception e) { L.LogWarning("SWITCH patches: " + e.Message); }
+        try { harmony.PatchAll(typeof(TourneyLocPatches)); } catch (System.Exception e) { L.LogWarning("TOURNEY loc patches: " + e.Message); }
         try { harmony.PatchAll(typeof(LetterPatches)); } catch (System.Exception e) { L.LogWarning("LETTER patches: " + e.Message); }
         try { harmony.PatchAll(typeof(DiagPatches)); } catch (System.Exception e) { L.LogWarning("DIAG patches: " + e.Message); }
         AddComponent<NetDriver>();
-        L.LogInfo("=== PotionCoop 0.0.29 loaded ===");
+        L.LogInfo("=== PotionCoop 0.0.61 loaded ===");
     }
 }
 

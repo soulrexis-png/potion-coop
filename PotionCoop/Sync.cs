@@ -25,7 +25,11 @@ public static class Sync
     public enum Op : byte { Grab = 1, Contents = 2, VatContents = 3, Shelve = 4, Drop = 5, Pose = 6, HandRow = 7, Pour = 8, Cat = 9, Toast = 10, Live = 11, Unshelve = 12, Hang = 13, Left = 14 }
 
     static readonly Dictionary<int, PotionFacade> Potions = new();
-    static readonly Dictionary<int, SlotFacade> Slots = new();
+    public static readonly Dictionary<int, SlotFacade> Slots = new();
+    // кто последним трогал склянку (для соревнования: кому очки за общую)
+    static readonly Dictionary<int, ulong> _lastBy = new();
+    public static ulong LastBy(PotionFacade p) => p != null && _lastBy.TryGetValue(p.Uid, out var id) ? id : 0;
+    public static ulong MyId;
     static readonly Dictionary<int, VatFacade> Vats = new();
     static readonly Dictionary<int, Transform> HomeParent = new();   // откуда забрали зелье в чужую руку
     static readonly HashSet<int> MyDropped = new();                   // мои брошенные — шлём, где улеглись
@@ -85,6 +89,7 @@ public static class Sync
         TickInitialScrub();
         TickHookReturn();
         TickSteals();
+        TickLandings();
         if (_cat == null || Coop.Role == Role.Solo || Coop.State != eGameState.Playing) return;
         var t = _cat.transform;
         if (Coop.Role == Role.Host)
@@ -151,7 +156,9 @@ public static class Sync
             var lt = Live[uid]; Live.Remove(uid);
             if (!Potions.TryGetValue(uid, out var p) || p == null) continue;
             p.transform.SetPositionAndRotation(lt.Pos, lt.Rot);
+            Unsteal(p);
             try { p.Unfreeze(); if (Coop.Role == Role.Host) Persistence?.RecordFloor(p); } catch { }
+            NoteLanding(p, lt.Pos, lt.Rot);
             Plugin.L.LogInfo($"SYNC: склянка {uid} зависла в полёте — отпустил");
         }
     }
@@ -356,7 +363,7 @@ public static class Sync
     {
         _initialScrubAt = Coop.Role == Role.Guest ? Time.unscaledTime + 6f : 0f;   // ждём, пока игра разложит руку (до 6 с), и сразу чистим
         Holders.Clear();
-        Potions.Clear(); Slots.Clear(); Vats.Clear(); HomeParent.Clear(); MyDropped.Clear(); RemoteHeld.Clear(); Flying.Clear(); Glides.Clear(); Live.Clear(); RecentlyReleased.Clear(); _prd = null;
+        Potions.Clear(); Slots.Clear(); Vats.Clear(); HomeParent.Clear(); MyDropped.Clear(); RemoteHeld.Clear(); Flying.Clear(); Glides.Clear(); Live.Clear(); RecentlyReleased.Clear(); _landed.Clear(); _prd = null;
         foreach (var p in UnityEngine.Object.FindObjectsByType<PotionFacade>(FindObjectsInactive.Include, FindObjectsSortMode.None))
             if (p != null && !p.IsViewModel) Potions[p.Uid] = p;
         foreach (var s in UnityEngine.Object.FindObjectsByType<SlotFacade>(FindObjectsInactive.Include, FindObjectsSortMode.None))
@@ -371,7 +378,9 @@ public static class Sync
         catch (Exception e) { Plugin.L.LogWarning("SYNC: подставки не нашёл: " + e.Message); }
         if (Coop.Role == Role.Host) { LoadSteals(); LoadHooks(); }
         _hasMySpawn = false;
+        ClearViz();   // новая сцена — старые фартуки ушли вместе с ней
         try { FindLooseRoot(); } catch (Exception e) { Plugin.L.LogWarning("SYNC loose root: " + e.Message); }
+        FindWorldLayer();
         var picker = UnityEngine.Object.FindFirstObjectByType<HeroPotionPicker>();
         _picker = picker;
         if (picker != null) Persistence = picker._potionsPersistence?.TryCast<PotionsPersistence>();
@@ -438,6 +447,7 @@ public static class Sync
     {
         if (potion == null) return;
         Touched(potion.Uid);
+        _lastBy[potion.Uid] = MyId;
         NetDriver.I?.LocalAnim("grab");
         NetDriver.I?.DummyGrab(potion);
         Out(Op.Grab, w => { w.Write(potion.Uid); w.Write(fromSlot != null ? fromSlot.Uid : 0); });
@@ -472,6 +482,7 @@ public static class Sync
                 if (p == null || s == null) break;
                 var u = UnitsOf(p.Contents);
                 Out(Op.Shelve, w => { w.Write(p.Uid); w.Write(s.Uid); w.Write((byte)u.Length); w.Write(u); });
+                Push.OnShelved(s);
                 break;
             }
             case eUndoMoveKind.Drop:
@@ -560,11 +571,11 @@ public static class Sync
                 case Op.Grab:
                 {
                     int uid = r.ReadInt32(), slotUid = r.ReadInt32();
-                    Touched(uid);
+                    Touched(uid); _lastBy[uid] = from;
                     if (!Potions.TryGetValue(uid, out var p)) break;
                     if (slotUid != 0 && Slots.TryGetValue(slotUid, out var s)) s.ClearPotion(true);
                     p.Freeze();
-                    if (!HomeParent.ContainsKey(uid)) HomeParent[uid] = p.transform.parent;
+                    if (!HomeParent.ContainsKey(uid) && !UnderHero(p.transform.parent)) HomeParent[uid] = p.transform.parent;   // рука жертвы «домом» быть не может — иначе брошенное на пол зелье остаётся висеть на ней
                     Glides.RemoveAll(g => g.P == p);
                     Live.Remove(uid);
                     if (RemoteHeld.TryGetValue(uid, out var prev) && prev != null && prev != who)
@@ -599,7 +610,7 @@ public static class Sync
                 case Op.Shelve:
                 {
                     int uid = r.ReadInt32(), slotUid = r.ReadInt32(); var u = r.ReadBytes(r.ReadByte());
-                    Touched(uid);
+                    Touched(uid); _lastBy[uid] = from;
                     if (!Potions.TryGetValue(uid, out var p) || !Slots.TryGetValue(slotUid, out var s)) break;
                     if (IsMine(p)) ScrubFromMe(p);    // моё зелье переставил другой — моя игра должна о нём забыть
                     DetachFromSlots(p, s);
@@ -612,19 +623,26 @@ public static class Sync
                     p.BeginFlyToSlot(s.PotionMount, false);
                     Persistence?.RecordShelved(p, s);
                     // у хоста это и есть начисление опыта за склянку гостя (единственное); у гостей — просто отметка «засчитано»
-                    try { bool scored = Persistence != null && Persistence.TryScoreShelve(p); if (scored && Coop.Role == Role.Host) Plugin.L.LogInfo($"XP: склянку {uid} поставил {who?.Name} — засчитал у себя"); } catch { }
+                    try
+                    {
+                        bool scored = Persistence != null && Persistence.TryScoreShelve(p);
+                        // только отметка «засчитано» (чтобы никто не получил за эту склянку второй раз); сам опыт гость получил у себя и прислал хосту
+                        if (scored && Coop.Role == Role.Host) Plugin.L.LogInfo($"XP: склянку {uid} поставил {who?.Name} — отмечена засчитанной");
+                    }
+                    catch { }
                     break;
                 }
                 case Op.Drop:
                 {
                     int uid = r.ReadInt32(); ReadPose(r, out var pos, out var rot); var u = r.ReadBytes(r.ReadByte());
-                    Touched(uid);
+                    Touched(uid); _lastBy[uid] = from;
                     if (!Potions.TryGetValue(uid, out var p)) break;
                     if (IsMine(p)) ScrubFromMe(p);
                     DetachFromSlots(p, null);
                     DetachFromHolders(p);
                     BurnUndoFor(uid, null);
                     Release(uid, p, who);
+                    Unsteal(p);   // бросок снимает «сворованное»: на полу зелье должно лежать в мире, а не на чьей-то руке
                     who?.PlayAction("throw");
                     p.SetLiquidContents(ToIl2(u)); p.RepaintLiquid();
                     // дальше зелье летит за точками, которые шлёт бросивший, 10 раз в секунду
@@ -670,7 +688,7 @@ public static class Sync
                 case Op.Hang:   // поставил мензурку на подставку
                 {
                     int uid = r.ReadInt32(); var key = r.ReadString();
-                    Touched(uid);
+                    Touched(uid); _lastBy[uid] = from;
                     if (!Potions.TryGetValue(uid, out var p) || !Holders.TryGetValue(key, out var h)) { Plugin.L.LogWarning($"SYNC: подставка {key} не найдена"); break; }
                     if (IsMine(p)) ScrubFromMe(p);
                     DetachFromSlots(p, null);
@@ -683,9 +701,9 @@ public static class Sync
                 }
                 case Op.Left:   // гость ушёл из аптеки — его склянки висят на крючке у точки, где он появился
                 {
-                    Vector3? eye = null;
-                    if (r.ReadByte() == 1) eye = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
-                    DropAllHeldBy(who, from, eye);
+                    Vector3? eye = null; float? eyeYaw = null;
+                    if (r.ReadByte() == 1) { eye = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle()); eyeYaw = r.ReadSingle(); }
+                    DropAllHeldBy(who, from, eye, eyeYaw);
                     break;
                 }
                 case Op.Toast:
@@ -706,7 +724,7 @@ public static class Sync
                         if (RecentlyReleased.ContainsKey(uid)) continue;   // брошенное/поставленное вернётся в ряд только через «взял»
                         if (RemoteHeld.TryGetValue(uid, out var h) && h != null && h != who) continue;
                         if (IsMine(p)) continue;   // если это кража — придёт Grab и всё сделает
-                        if (!HomeParent.ContainsKey(uid)) HomeParent[uid] = p.transform.parent;
+                        if (!HomeParent.ContainsKey(uid) && !UnderHero(p.transform.parent)) HomeParent[uid] = p.transform.parent;
                         Glides.RemoveAll(g => g.P == p);
                         p.Freeze();
                         p.gameObject.SetActive(true);
@@ -737,8 +755,10 @@ public static class Sync
                     {   // долетело: ставим точно на место
                         Live.Remove(uid);
                         p.transform.SetPositionAndRotation(pos, rot);
+                        Unsteal(p);
                         Applying = false;
                         try { p.Unfreeze(); Persistence?.RecordFloor(p); } catch { }
+                        NoteLanding(p, pos, rot);
                         if (flying.Thrower != null) HostMaybeBreak(p, flying.Thrower);
                         break;
                     }
@@ -783,6 +803,106 @@ public static class Sync
         catch { }
         return false;
     }
+    // Брошенное зелье больше не «в руках»: забываем «дом», возвращаем его в мир и чиним то,
+    // что игра выключает на время переноски — столкновения, слой и состояние переноса.
+    // Без этого у обокраденного зелье на полу проваливается под текстуры и не берётся.
+    static void Unsteal(PotionFacade p)
+    {
+        if (p == null) return;
+        bool onHand = false;
+        try { onHand = UnderHero(p.transform.parent); } catch { }
+        HomeParent.Remove(p.Uid);
+        ToWorld(p);
+        try { _picker?.SetTakenDown(p, false); } catch { }
+        try { p.gameObject.SetActive(true); } catch { }
+        Revive(p, onHand ? "снял со своей руки" : null);
+    }
+
+    // Слой, на котором живут обычные склянки на полу (у носимой игра подменяет слой на «геройский»)
+    static int _worldLayer = -1;
+    static void FindWorldLayer()
+    {
+        _worldLayer = -1;
+        try
+        {
+            var count = new Dictionary<int, int>();
+            foreach (var p in Potions.Values)
+            {
+                if (p == null || !IsLoose(p)) continue;
+                int l = p.gameObject.layer;
+                count[l] = count.TryGetValue(l, out var n) ? n + 1 : 1;
+            }
+            if (count.Count == 0) return;
+            _worldLayer = count.OrderByDescending(kv => kv.Value).First().Key;
+            int hero = -1;
+            try { hero = LayerMask.NameToLayer(CodeBase.Components.Potions.PotionBody.HeroLayerName); } catch { }
+            Plugin.L.LogInfo($"SYNC: склянки на полу лежат на слое {_worldLayer} «{LayerMask.LayerToName(_worldLayer)}», в руках — слой {hero}");
+        }
+        catch (Exception e) { Plugin.L.LogWarning("SYNC world layer: " + e.Message); }
+    }
+
+    // Вернуть зелью всё, что игра снимает с носимого: столкновения, слой, состояние переноса
+    static void Revive(PotionFacade p, string why)
+    {
+        if (p == null) return;
+        int was = -1; try { was = p.gameObject.layer; } catch { }
+        bool body = false, layer = false;
+        try { DG.Tweening.DOTween.Kill(p.transform, false); DG.Tweening.DOTween.Kill(p.gameObject, false); } catch { }
+        try { p.Carrier()?.MarkIdle(); } catch { }
+        try { var b = p._body; if (b != null) { b.SetCollisionEnabled(true); b.WakeUp(); body = true; } }
+        catch (Exception e) { Plugin.L.LogWarning("SYNC: столкновения зелья не включились: " + e.Message); }
+        try { p.ViewModelLayerSwitcher()?.ApplyCurrentState(); } catch { }
+        try { if (_worldLayer >= 0 && p.gameObject.layer != _worldLayer) { p.gameObject.layer = _worldLayer; layer = true; } } catch { }
+        if (why != null || layer)
+            Plugin.L.LogInfo($"SYNC: зелье {p.Uid} вернул в мир ({why ?? "бросок"}): слой {was}{(layer ? $" → {_worldLayer}" : "")}, столкновения {(body ? "включил" : "не нашёл тела")}; {StateOf(p)}");
+    }
+
+    // Что игра думает про зелье — для разбора по логам
+    static string StateOf(PotionFacade p)
+    {
+        string par = "мир", carry = "?", flags = "";
+        try { par = p.transform.parent != null ? p.transform.parent.name : "мир"; } catch { }
+        try { carry = p.Carrier()?.CarryState?.Value.ToString() ?? "?"; } catch { }
+        try { flags = $"лежит={p.IsLooseAtRest}, покой={p.IsResting}, парит={p.IsFloating}, потеряно={p.IsLost}"; } catch { }
+        return $"родитель «{par}», перенос {carry}, {flags}";
+    }
+
+    // ---------- страховка: брошенное не должно провалиться под пол ----------
+    class Landing { public Vector3 Pos; public Quaternion Rot; public float At; public int Tries; }
+    static readonly Dictionary<int, Landing> _landed = new();
+    static void NoteLanding(PotionFacade p, Vector3 pos, Quaternion rot)
+    {
+        if (p != null) _landed[p.Uid] = new Landing { Pos = pos, Rot = rot, At = Time.unscaledTime };
+    }
+    static void TickLandings()
+    {
+        if (_landed.Count == 0) return;
+        List<int> done = null;
+        foreach (var kv in _landed)
+        {
+            if (Time.unscaledTime - kv.Value.At < 0.6f) continue;
+            if (!Potions.TryGetValue(kv.Key, out var p) || p == null || RemoteHeld.ContainsKey(kv.Key) || Live.ContainsKey(kv.Key) || IsMine(p))
+            { (done ??= new List<int>()).Add(kv.Key); continue; }
+            Vector3 now; try { now = p.transform.position; } catch { (done ??= new List<int>()).Add(kv.Key); continue; }
+            (done ??= new List<int>()).Add(kv.Key);   // проверяем один раз: дёргать склянку туда-сюда нельзя
+            if (now.y > kv.Value.Pos.y - 0.4f) continue;
+            Plugin.L.LogWarning($"SYNC: зелье {kv.Key} после приземления ушло вниз (y {now.y:0.00} вместо {kv.Value.Pos.y:0.00}); {StateOf(p)}");
+            Applying = true;
+            try
+            {
+                p.Freeze();
+                p.transform.SetPositionAndRotation(kv.Value.Pos, kv.Value.Rot);
+                Unsteal(p);
+                Revive(p, "ушло под пол");
+                p.Unfreeze();
+                if (Coop.Role == Role.Host) Persistence?.RecordFloor(p);
+            }
+            catch (Exception e) { Plugin.L.LogWarning("SYNC: не смог вернуть зелье на пол: " + e.Message); }
+            finally { Applying = false; }
+        }
+        if (done != null) foreach (var uid in done) _landed.Remove(uid);
+    }
+
     static void ToWorld(PotionFacade p)
     {
         if (p == null) return;
@@ -794,12 +914,12 @@ public static class Sync
     }
 
     // где я появился в этой аптеке (первая позиция камеры в игре)
-    static Vector3 _mySpawn; static bool _hasMySpawn;
-    public static void NoteMyPos(Vector3 eye) { if (!_hasMySpawn && Potions.Count > 0 && Coop.State == eGameState.Playing) { _mySpawn = eye; _hasMySpawn = true; } }
+    static Vector3 _mySpawn; static float _mySpawnYaw; static bool _hasMySpawn;
+    public static void NoteMyPos(Vector3 eye, float yaw) { if (!_hasMySpawn && Potions.Count > 0 && Coop.State == eGameState.Playing) { _mySpawn = eye; _mySpawnYaw = yaw; _hasMySpawn = true; } }
     public static void AnnounceLeft()
     {
-        var sp = _mySpawn; bool has = _hasMySpawn;
-        Out(Op.Left, w => { w.Write((byte)(has ? 1 : 0)); if (has) { w.Write(sp.x); w.Write(sp.y); w.Write(sp.z); } });
+        var sp = _mySpawn; float sy = _mySpawnYaw; bool has = _hasMySpawn;
+        Out(Op.Left, w => { w.Write((byte)(has ? 1 : 0)); if (has) { w.Write(sp.x); w.Write(sp.y); w.Write(sp.z); w.Write(sy); } });
     }
 
     // ---------- подставки (мензурки на столе / сепараторе) ----------
@@ -947,6 +1067,7 @@ public static class Sync
     // склянку кто-то тронул — она больше не «чья-то на крючке»
     static void Touched(int uid)
     {
+        VizTouched(uid);
         if (Coop.Role != Role.Host || Hooks.Count == 0) return;
         bool changed = false;
         foreach (var l in Hooks.Values) changed |= l.Remove(uid);
@@ -954,12 +1075,28 @@ public static class Sync
     }
 
     public static void DropAllHeldBy(Avatar a) => DropAllHeldBy(a, 0, null);
-    public static void DropAllHeldBy(Avatar a, ulong owner, Vector3? hookEye)
+    // нарисованные крючки: фартук + чьи склянки на нём + ник для подписи
+    public class HookViz { public GameObject Go; public string Name; public Vector3 Top; public List<int> Uids = new(); }
+    public static readonly List<HookViz> Viz = new();
+    static void VizTouched(int uid)
+    {
+        for (int i = Viz.Count - 1; i >= 0; i--)
+        {
+            var v = Viz[i];
+            if (!v.Uids.Remove(uid) || v.Uids.Count > 0) continue;
+            if (v.Go != null) UnityEngine.Object.Destroy(v.Go);
+            Viz.RemoveAt(i);   // всё разобрали — фартук пропадает
+        }
+    }
+    static void ClearViz() { foreach (var v in Viz) if (v.Go != null) UnityEngine.Object.Destroy(v.Go); Viz.Clear(); }
+
+    public static void DropAllHeldBy(Avatar a, ulong owner, Vector3? hookEye) => DropAllHeldBy(a, owner, hookEye, null);
+    public static void DropAllHeldBy(Avatar a, ulong owner, Vector3? hookEye, float? hookYaw)
     {
         if (a == null) return;
         Vector3 eye;
         try { eye = hookEye ?? (a.HasSpawn ? a.SpawnEye : a.Root.transform.position + Vector3.up * 1.4f); } catch { eye = Vector3.zero; }
-        var at = eye - Vector3.up * 0.45f;   // примерно на уровне груди
+        float yaw = hookYaw ?? (a.HasSpawn ? a.SpawnYaw : 0f);
         var mine = new List<int>();
         foreach (var kv in Potions)
         {
@@ -967,6 +1104,19 @@ public static class Sync
             bool his = (RemoteHeld.TryGetValue(kv.Key, out var h) && h == a) || a.Holds(p.transform);
             if (his) mine.Add(kv.Key);
         }
+        if (mine.Count == 0) return;
+        // крючок — чуть ниже глаз, перед точкой появления; фартук смотрит туда же, куда смотрел аптекарь
+        var hookPos = eye - Vector3.up * 0.25f;
+        Vector3[] slots;
+        GameObject go = null;
+        try { go = Avatar.BuildHook(hookPos, yaw, a.ColorIndex, mine.Count, out slots); }
+        catch (Exception e)
+        {
+            Plugin.L.LogWarning("HOOK viz: " + e.Message);
+            slots = new Vector3[mine.Count];
+            for (int i = 0; i < mine.Count; i++) slots[i] = hookPos - Vector3.up * (0.25f + 0.12f * (i / 2)) + Quaternion.Euler(0, yaw, 0) * new Vector3(i % 2 == 0 ? -0.1f : 0.1f, 0, 0.07f);
+        }
+        var viz = new HookViz { Go = go, Name = a.Name, Top = hookPos + Vector3.up * 0.15f };
         for (int i = 0; i < mine.Count; i++)
         {
             var p = Potions[mine[i]];
@@ -975,20 +1125,20 @@ public static class Sync
             Live.Remove(mine[i]); Glides.RemoveAll(g => g.P == p);
             ToWorld(p);
             p.gameObject.SetActive(true);
-            float ang = i * Mathf.PI * 2f / Mathf.Max(1, mine.Count);
-            float rad = mine.Count == 1 ? 0f : 0.22f + 0.02f * mine.Count;
-            p.transform.SetPositionAndRotation(at + new Vector3(Mathf.Cos(ang) * rad, (i % 2) * 0.08f, Mathf.Sin(ang) * rad), Quaternion.identity);
-            p.Freeze();   // висит в воздухе, пока кто-нибудь не возьмёт
+            p.transform.SetPositionAndRotation(slots[i], Quaternion.Euler(0, yaw, 0));
+            p.Freeze();   // висит в кармашке, пока кто-нибудь не возьмёт
+            viz.Uids.Add(mine[i]);
             Applying = true;
             try { if (Coop.Role == Role.Host) Persistence?.RecordFloor(p); } catch { } finally { Applying = false; }
         }
-        if (Coop.Role == Role.Host && owner != 0 && mine.Count > 0)
+        Viz.Add(viz);
+        if (Coop.Role == Role.Host && owner != 0)
         {
             if (!Hooks.TryGetValue(owner, out var l)) Hooks[owner] = l = new List<int>();
             foreach (var u in mine) if (!l.Contains(u)) l.Add(u);
             SaveHooks();
         }
-        if (mine.Count > 0) Plugin.L.LogInfo($"HOOK: {a.Name} ушёл — {mine.Count} склянок висят на крючке у точки появления");
+        Plugin.L.LogInfo($"HOOK: {a.Name} ушёл — {mine.Count} склянок висят на фартуке у точки появления");
     }
 
     // гость: хост прислал, что висит на моём крючке — забираю, когда игра готова
@@ -1207,7 +1357,7 @@ public static class Sync
         try { DG.Tweening.DOTween.Kill(p.transform, false); DG.Tweening.DOTween.Kill(p.gameObject, false); p.Carrier()?.MarkIdle(); } catch { }
         p.Freeze();
         if (thief != null) { CountSteal(thief.Name); Coop.Say(Loc.L($"{thief.Name} отобрал у тебя зелье!", $"{thief.Name} snatched a potion from you!"), 3f); NetDriver.I?.LocalEmoteFlash(3); }
-        Plugin.L.LogInfo($"SYNC: зелье {p.Uid} отобрал {thief?.Name}");
+        Plugin.L.LogInfo($"SYNC: зелье {p.Uid} отобрал {thief?.Name}; {StateOf(p)}");
     }
 
     // Я хватаю зелье, которое держит чужой аптекарь, — сначала забираем его у аптекаря
@@ -1241,11 +1391,38 @@ static class SyncPatches
     // Отбирать можно (так веселее), но с учётом: зелье сначала забираем у чужого аптекаря
     [HarmonyPrefix]
     [HarmonyPatch(typeof(HeroPotionPicker), nameof(HeroPotionPicker.Grab))]
-    static void Grab_Pre(PotionFacade potion) { try { Sync.BeforeLocalGrab(potion); } catch (Exception e) { Plugin.L.LogError("SYNC steal: " + e.Message); } }
+    static bool Grab_Pre(PotionFacade potion)
+    {
+        if (Tourney.On && Tourney.Arbiter && Coop.Role == Role.Host) { Coop.Say(Loc.L("Арбитр только смотрит", "The arbiter only watches"), 2f); return false; }
+        if (Tourney.IsSpectator(Sync.MyId)) { Coop.Say(Loc.L("Ты зритель — склянки не трогаешь", "You're a spectator — no touching flasks"), 2f); return false; }
+        if (Tourney.On && !Tourney.Started) { Coop.Say(Tourney.WaitText(), 2f); return false; }
+        try { Sync.BeforeLocalGrab(potion); } catch (Exception e) { Plugin.L.LogError("SYNC steal: " + e.Message); }
+        return true;
+    }
 
     [HarmonyPrefix]
     [HarmonyPatch(typeof(HeroPotionPicker), nameof(HeroPotionPicker.GrabIntoApron))]
-    static void GrabApron_Pre(PotionFacade potion) { try { Sync.BeforeLocalGrab(potion); } catch (Exception e) { Plugin.L.LogError("SYNC steal: " + e.Message); } }
+    static bool GrabApron_Pre(PotionFacade potion)
+    {
+        if (Tourney.On && Tourney.Arbiter && Coop.Role == Role.Host) return false;
+        if (Tourney.On && !Tourney.Started) return false;
+        if (Tourney.IsSpectator(Sync.MyId)) return false;
+        try { Sync.BeforeLocalGrab(potion); } catch (Exception e) { Plugin.L.LogError("SYNC steal: " + e.Message); }
+        return true;
+    }
+
+    // Соревнование: в общую ячейку можно ставить только когда своя зона собрана (раньше — склянка остаётся в руке)
+    [HarmonyPrefix]
+    [HarmonyPatch(typeof(HeroPotionPicker), nameof(HeroPotionPicker.ShelveInto))]
+    static bool ShelveInto_Pre(SlotFacade slot)
+    {
+        try
+        {
+            if (Tourney.BlockCommon(slot)) { Coop.Say(Loc.L("Сначала своя зона — потом общие", "Own zone first — then the commons"), 2f); return false; }
+        }
+        catch (Exception e) { Plugin.L.LogError("TOURNEY shelve block: " + e.Message); }
+        return true;
+    }
 
     // Кнопка «Продолжить» получает сервис сохранений при создании меню — забираем ссылку себе
     [HarmonyPostfix]

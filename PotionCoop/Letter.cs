@@ -20,40 +20,49 @@ public static class Letter
     static CodeBase.Components.Hero.HeroLook _look;
     public static bool Open => _win != null || _fallback;
 
-    static string Title => Loc.Ru ? "Общая аптека" : "Shared pharmacy";
-    static string Body => Loc.Ru
-        ? "Дорогой аптекарь!\n\n" +
+    static string Title => Loc.L("Общая аптека", "Shared pharmacy");
+    static string Body => Loc.Ru ? BodyRu : Loc.Cur == Lang.En ? BodyEn : Loc.TrLines(BodyEn);
+    const string BodyRu =
+          "Дорогой аптекарь!\n\n" +
           "Ты не один в этой лаборатории. Всё, что ты берёшь, переливаешь и ставишь, видят остальные — и наоборот.\n\n" +
           "• T (держать) — колесо эмоций, отпусти на нужной\n" +
-          "• Колёсико мыши или F2 — «я тут»: всем видно, где ты\n" +
+          "• G или F2 — «я тут»: всем видно, где ты\n" +
           "• Из чужих рук склянку можно отобрать. Кражи считаются\n" +
           "• «Шаг назад» не вернёт склянку, которую уже тронул другой\n" +
           "• Ушёл — твои склянки ждут на крючке, там, где ты появился\n" +
           "• F9 — манекен, чтобы проверить что-то одному\n" +
+          "• Соревнование: у каждой команды своя зона по цветам, табло справа вверху. Общие склянки дают очки, только когда своя зона собрана\n" +
           "• F11 — собрать логи, если что-то сломалось\n\n" +
           "Иногда случается всякое:\n" +
           "• Землетрясение — склянки с пола и недособранных полок разлетаются\n" +
           "• Хрупкие склянки — брошенная может разбиться, зелье разольётся по соседним\n" +
           "• Дырявый карман — из рук выпадает одна-две склянки\n" +
           "• Переутомление — ходишь медленно, пока не погладишь кота\n" +
-          "Хост: F8 — выключить все модификаторы у всех, если что-то пошло не так (ещё раз — включить)\n\n" +
-          "Удачной смены!"
-        : "Dear apothecary,\n\n" +
+          "• Дальтоник-дух — на минуту цвета путаются или исчезают. Проходит сам, или хост выключает модификаторы (F8)\n" +
+          "Хост: F8 — меню модификаторов: включить/выключить каждый или все сразу\n" +
+          "H — толчок: за правильно поставленные склянки копится заряд, у игрока рядом выпадают зелья\n\n" +
+          "Удачной смены!";
+    const string BodyEn =
+          "Dear apothecary,\n\n" +
           "You are not alone in this lab. Everything you take, pour and shelve, the others see too — and the other way round.\n\n" +
           "• T (hold) — emote wheel, release on the one you want\n" +
-          "• Middle mouse or F2 — \"I'm here\": everyone sees where you are\n" +
+          "• G or F2 — \"I'm here\": everyone sees where you are\n" +
           "• You can snatch a potion out of someone's hands. Steals are counted\n" +
           "• Undo won't bring back a potion someone else has touched\n" +
           "• Leave — and your potions wait on a hook where you appeared\n" +
           "• F9 — a dummy to try things alone\n" +
+          "• Competition: each team has its own colour zone, the scoreboard is top right. Common flasks score only after your own zone is done\n" +
           "• F11 — collect logs if something breaks\n\n" +
           "Now and then things happen:\n" +
           "• Earthquake — potions on the floor and on unfinished shelves go flying\n" +
           "• Fragile flasks — a thrown flask may break and spill into its neighbours\n" +
           "• Leaky pocket — one or two potions slip out of your hands\n" +
           "• Exhaustion — you move slowly until you pet the cat\n" +
-          "Host: F8 — turn all modifiers off for everyone if something goes wrong (again — back on)\n\n" +
+          "• Colour-blind spirit — for a minute your colours get mixed up or vanish. It fades on its own, or the host turns modifiers off (F8)\n" +
+          "Host: F8 — modifiers menu: switch each one or all of them on/off\n" +
+          "H — shove: correct shelvings charge it, a nearby player drops their potions\n\n" +
           "Have a good shift!";
+
 
     public static void Toggle() { if (Open) Close(); else Show(); }
 
@@ -135,7 +144,7 @@ public static class Letter
         GUI.Label(new Rect(x, y + 20, w, 40), Title, _head);
         GUI.Label(new Rect(x + 40, y + 70, w - 80, h - 120), Body, _text);
         _text.alignment = TextAnchor.MiddleCenter;
-        GUI.Label(new Rect(x, y + h - 44, w, 30), Loc.Ru ? "Enter / Пробел / Esc — закрыть" : "Enter / Space / Esc — close", _text);
+        GUI.Label(new Rect(x, y + h - 44, w, 30), Loc.L("Enter / Пробел / Esc — закрыть", "Enter / Space / Esc — close"), _text);
         _text.alignment = TextAnchor.UpperLeft;
     }
 }
@@ -145,5 +154,10 @@ static class LetterPatches
     // сервис окон игры приходит в кнопку «Продолжить» при сборке меню
     [HarmonyPostfix]
     [HarmonyPatch(typeof(CodeBase.Components.UI.AdvancedButtonContinueStarter), nameof(CodeBase.Components.UI.AdvancedButtonContinueStarter.Construct))]
-    static void Construct_Post(IUIService uiService) { if (uiService != null) Letter.Ui = uiService; }
+    static void Construct_Post(IUIService uiService, CodeBase.Services.PotionsPersistenceService.IPotionsPersistence potionsPersistence)
+    {
+        if (uiService != null) Letter.Ui = uiService;
+        // нужен, чтобы при смене аптеки в меню забыть кэш склянок
+        try { if (potionsPersistence != null && Sync.Persistence == null) Sync.Persistence = potionsPersistence.TryCast<CodeBase.Services.PotionsPersistenceService.PotionsPersistence>(); } catch { }
+    }
 }

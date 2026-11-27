@@ -1,8 +1,16 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
-rem === Папка игры. Если у тебя она в другом месте — поменяй только эту строку ===
-set "GAME=E:\SteamLibrary\steamapps\common\A Place for Every Potion"
+rem === Папка игры находится сама (все библиотеки Steam). Если не нашлась — поменяй путь по умолчанию ниже ===
+set "GAME="
+rem ищем игру во всех библиотеках Steam сами; не нашли — путь по умолчанию
+for /f "usebackq delims=" %%G in (`powershell -NoProfile -ExecutionPolicy Bypass -File "Installer\find_game.ps1"`) do set "GAME=%%G"
+if not defined GAME set "GAME=E:\SteamLibrary\steamapps\common\A Place for Every Potion"
+echo Игра: %GAME%
+if not exist "%GAME%\BepInEx\interop" (
+  echo В папке игры нет BepInEx\interop — поставь мод готовым установщиком и один раз запусти игру.
+  goto :err
+)
 
 tasklist /fi "imagename eq A Place for Every Potion.exe" | find /i "A Place for Every Potion.exe" >nul && (
   echo Закрой игру и запусти ещё раз.
@@ -11,7 +19,7 @@ tasklist /fi "imagename eq A Place for Every Potion.exe" | find /i "A Place for 
 )
 
 echo [1/3] Собираю мод...
-dotnet build PotionCoop -c Release || goto :err
+dotnet build PotionCoop -c Release -p:GameDir="%GAME%" || goto :err
 
 echo.
 echo [2/3] Упаковываю загрузчик и мод из папки игры...

@@ -33,8 +33,9 @@ public static class Xp
         {
             int delta = cur - _last; _last = cur;
             if (Coop.Role == Role.Host) { send(false, cur); _nextBroadcast = Time.unscaledTime + 5f; Plugin.L.LogInfo($"XP: {(delta > 0 ? "+" : "")}{delta}, всего {cur}"); }
-            // гость: свой прирост никуда не шлём — итог от хоста (раз в 5 с и на каждое изменение) всё выправит
+            else if (Coop.Role == Role.Guest && delta > 0) _pendingSend += delta;   // гость: прирост — хосту
         }
+        if (Coop.Role == Role.Guest && _pendingSend > 0) { send(true, _pendingSend); Plugin.L.LogInfo($"XP: +{_pendingSend} → хосту"); _pendingSend = 0; }
         // хост раз в 5 секунд повторяет итог — для тех, кто зашёл позже
         if (Coop.Role == Role.Host && Time.unscaledTime >= _nextBroadcast) { _nextBroadcast = Time.unscaledTime + 5f; send(false, cur); }
     }
@@ -71,11 +72,17 @@ public static class Xp
         catch (Exception e) { Plugin.L.LogWarning("XP scored: " + e.Message); }
     }
 
+    // ---- опыт гостей ----
+    // Опыт гостю начисляет его же игра — за всё, как хосту: склянка на полке, доведённое зелье, полка, секция, переворот.
+    // Гость шлёт хосту только прирост, хост прибавляет его к общему и рассылает итог.
+    // Дюпа нет: каждое «засчитано» (склянка, полка, секция) расходится всем, и повторно за то же самое игра опыт не даёт (п. 28).
+    static int _pendingSend;   // гость: заработал, но ещё не отправил
     public static void AddFromGuest(int delta, string who)
     {
-        var e = Exp(); if (e == null || delta <= 0 || delta > 100000) return;
+        if (Coop.Role != Role.Host || delta <= 0 || delta > 500) return;   // защита от мусора
+        var e = Exp(); if (e == null) return;
         e.Value = e.Value + delta;
-        Plugin.L.LogInfo($"XP: +{delta} от {who}, всего {e.Value}");
+        Plugin.L.LogInfo($"XP: {who} заработал +{delta}");
     }
 
     static int _hostTotal = int.MinValue;
@@ -83,8 +90,11 @@ public static class Xp
     {
         _hostTotal = total;
         var e = Exp(); if (e == null) return;
-        if (e.Value != total) e.Value = total;
-        _last = total;
+        // то, что гость заработал после прошлой проверки и ещё не отправил, не теряем: оставляем сверху и отправим следующим тактом
+        if (_last != int.MinValue && e.Value > _last) _pendingSend += e.Value - _last;
+        int show = total + _pendingSend;
+        if (e.Value != show) e.Value = show;
+        _last = show;
     }
 }
 

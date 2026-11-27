@@ -91,8 +91,6 @@ public static class MenuButtons
         foreach (var tx in go.GetComponentsInChildren<TMPro.TMP_Text>(true)) tx.text = t;
     }
 
-    public static void Reset() { _btn = null; _joinTarget = 0; _screen.Clear(); _hidden.Clear(); _nameBtn = null; }
-
     // ---------- Экран «Общие аптеки» ----------
     // Как «Настройки» в игре: прячем кнопки меню и на их месте показываем свои — копии родной кнопки (они точно жмутся мышью).
     // Сюда же потом лягут турнир и настройки коопа.
@@ -101,11 +99,31 @@ public static class MenuButtons
     static string _nameShown, _hostsKey;
     public static bool ScreenOpen => _screen.Count > 0;
 
-    public class Entry { public string Label; public Action Click; public bool IsName; }
+    // Left/Right — строка-выбор «‹ значение ›»: две стрелки по бокам, сама надпись не нажимается
+    public class Entry { public string Label; public Action Click; public bool IsName; public bool IsLabel; public Action Left, Right; }
 
-    public static void OpenScreen(List<Entry> entries, string hostsKey)
+    // строка-заголовок (вопрос): та же надпись, но не кнопка — без подсветки и без нажатия
+    static void MakeLabel(GameObject go)
+    {
+        try
+        {
+            foreach (var mb in go.GetComponentsInChildren<MonoBehaviour>(true))
+            {
+                if (mb == null) continue;
+                var n = mb.GetIl2CppType().Name;
+                if (n.Contains("Button") || n.Contains("Selectable") || n.Contains("EventTrigger") || n.Contains("Hover") || n.Contains("Highlight") || n.Contains("Animator")) mb.enabled = false;
+            }
+            foreach (var g in go.GetComponentsInChildren<UnityEngine.UI.Graphic>(true)) g.raycastTarget = false;
+            foreach (var tx in go.GetComponentsInChildren<TMPro.TMP_Text>(true)) tx.color = new Color(tx.color.r, tx.color.g, tx.color.b, 0.75f);
+        }
+        catch (Exception e) { Plugin.L.LogWarning("MENU label: " + e.Message); }
+    }
+
+    public static string Tag = "";   // какой экран открыт («main», «create», …) — для Esc и обновлений
+    public static void OpenScreen(List<Entry> entries, string hostsKey, string tag = "")
     {
         if (_btn == null) return;
+        Tag = tag;
         try
         {
             CloseScreen(false);
@@ -120,16 +138,43 @@ public static class MenuButtons
             var tpl = Coop.ContinueStarter != null ? Coop.ContinueStarter.gameObject : _btn;
             foreach (var e in entries)
             {
+                if (e.Left != null || e.Right != null) { _screen.Add(ArrowRow(tpl, parent, e)); continue; }
                 var act = e.Click;
                 var go = Clone(tpl, e.Label, () => act?.Invoke());
                 go.transform.SetParent(parent, false);
                 go.transform.SetAsLastSibling();
                 _screen.Add(go);
                 if (e.IsName) { _nameBtn = go; _nameShown = e.Label; }
+                if (e.IsLabel) MakeLabel(go);
             }
             Plugin.L.LogInfo($"MENU: открыт экран общих аптек ({entries.Count} кнопок)");
         }
         catch (Exception ex) { Plugin.L.LogError("MENU: экран общих аптек: " + ex); CloseScreen(); }
+    }
+
+    // строка-выбор «<  значение  >»: обычная кнопка (встаёт в колонку как все), а нажатие левее середины — назад, правее — вперёд
+    static GameObject ArrowRow(GameObject tpl, Transform parent, Entry e)
+    {
+        GameObject go = null;
+        var left = e.Left; var right = e.Right;
+        go = Clone(tpl, $"<    {e.Label}    >", () =>
+        {
+            bool isLeft = false;
+            try
+            {
+                var rt = go.GetComponent<RectTransform>();
+                var canvas = go.GetComponentInParent<Canvas>();
+                var cam = canvas != null && canvas.renderMode != RenderMode.ScreenSpaceOverlay ? canvas.worldCamera : null;
+                var mp = UnityEngine.InputSystem.Mouse.current != null ? UnityEngine.InputSystem.Mouse.current.position.ReadValue() : Vector2.zero;
+                if (RectTransformUtility.ScreenPointToLocalPointInRectangle(rt, mp, cam, out var local))
+                    isLeft = local.x < rt.rect.center.x;
+            }
+            catch { }
+            (isLeft ? left : right)?.Invoke();
+        });
+        go.transform.SetParent(parent, false);
+        go.transform.SetAsLastSibling();
+        return go;
     }
 
     public static void CloseScreen(bool log = true)

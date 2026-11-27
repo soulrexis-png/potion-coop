@@ -5,6 +5,7 @@ using CodeBase.Components.Potions;
 using CodeBase.Components.Vats;
 using CodeBase.Services.ConfigsService;
 using CodeBase.Services.DataMediatorService;
+using CodeBase.Components.Potions.Liquid;
 
 namespace PotionCoop;
 
@@ -17,23 +18,35 @@ public static class ColorCurse
     static readonly int[] _map = new int[14];   // семейство → чей цвет показываем (для shuffle)
     static bool _inside;                        // защита от рекурсии
     public const float Duration = 60f;
+    static float _nextTickLog;
+
+    // сколько секунд осталось (0, если духа нет)
+    public static float Remaining => On ? Mathf.Max(0f, _until - Time.unscaledTime) : 0f;
 
     public static bool Shuffle => string.Equals(Plugin.ModBlindMode.Value?.Trim(), "shuffle", StringComparison.OrdinalIgnoreCase);
 
     public static void Set(bool on, string why)
     {
-        if (on) _until = Time.unscaledTime + Duration;
+        // повторное «наслать» при уже включённом духе таймер НЕ продлевает (раньше молча перезапускало минуту)
+        if (on && On)
+        {
+            Plugin.L.LogInfo($"MOD: Дальтоник-дух уже включён ({why}) — таймер не продлеваю, осталось {Remaining:0} с, {DateTime.Now:HH:mm:ss}");
+            return;
+        }
+        if (on) { _until = Time.unscaledTime + Duration; _nextTickLog = Time.unscaledTime + 20f; }
         if (On == on) return;
         On = on;
         if (on) MakeMap();
-        Plugin.L.LogInfo(on ? $"MOD: Дальтоник-дух ({why}, режим {(Shuffle ? "перемешка" : "блёклые цвета")})" : "MOD: Дальтоник-дух ушёл");
-        Coop.Say(on ? (Shuffle ? Loc.L("Дальтоник-дух перепутал тебе цвета! (минута)", "The colour-blind spirit mixed up your colours! (one minute)") : Loc.L("Дальтоник-дух забрал у тебя цвета! (минута)", "The colour-blind spirit stole your colours! (one minute)")) : Loc.L("Цвета вернулись", "Your colours are back"), 4f);
+        Plugin.L.LogInfo(on ? $"MOD: Дальтоник-дух ({why}, режим {(Shuffle ? "перемешка" : "блёклые цвета")}) на {Duration:0} с, {DateTime.Now:HH:mm:ss}" : $"MOD: Дальтоник-дух ушёл ({why}), {DateTime.Now:HH:mm:ss}");
+        Coop.Say(on ? (Shuffle ? Loc.L("Дальтоник-дух перепутал тебе цвета! (пройдёт сам через минуту)", "The colour-blind spirit mixed up your colours! (wears off in a minute)") : Loc.L("Дальтоник-дух забрал у тебя цвета! (пройдёт сам через минуту)", "The colour-blind spirit stole your colours! (wears off in a minute)")) : Loc.L("Цвета вернулись", "Your colours are back"), 4f);
         Repaint();
     }
 
     public static void Tick()
     {
-        if (On && Time.unscaledTime > _until) Set(false, "время вышло");
+        if (!On) return;
+        if (Time.unscaledTime > _until) { Set(false, "время вышло"); return; }
+        if (Time.unscaledTime >= _nextTickLog) { _nextTickLog = Time.unscaledTime + 20f; Plugin.L.LogInfo($"MOD: Дальтоник-дух ещё {Remaining:0} с, {DateTime.Now:HH:mm:ss}"); }
     }
 
     static void MakeMap()
@@ -48,8 +61,19 @@ public static class ColorCurse
         }
     }
 
+    // цвета жидкостей игра один раз заливает в видеокарту (LiquidFamilyPalette) — мы правим их при заливке и заливаем заново
+    public static LiquidLookConfig Cfg;
     static void Repaint()
     {
+        try
+        {
+            if (Cfg == null)
+                foreach (var o in Resources.FindObjectsOfTypeAll(Il2CppInterop.Runtime.Il2CppType.Of<LiquidLookConfig>())) { Cfg = o.TryCast<LiquidLookConfig>(); if (Cfg != null) break; }
+            LiquidFamilyPalette.Invalidate();
+            if (Cfg != null) LiquidFamilyPalette.EnsureUploaded(Cfg);
+            Plugin.L.LogInfo($"MOD: палитра жидкостей перезалита ({(On ? "дух" : "обычная")})");
+        }
+        catch (Exception e) { Plugin.L.LogWarning("MOD: палитра: " + e.Message); }
         try
         {
             foreach (var p in UnityEngine.Object.FindObjectsByType<PotionFacade>(FindObjectsInactive.Exclude, FindObjectsSortMode.None)) try { p.RepaintLiquid(); } catch { }
@@ -63,6 +87,24 @@ public static class ColorCurse
         float l = 0.299f * c.r + 0.587f * c.g + 0.114f * c.b;
         var gray = new Color(l * 0.8f + 0.1f, l * 0.8f + 0.1f, l * 0.8f + 0.1f, c.a);
         return Color.Lerp(c, gray, 0.85f);
+    }
+
+    // при заливке палитры: слот = семейство
+    static bool _packLogged;
+    public static void Pack(int slot, ref Color hue, ref Color dark)
+    {
+        if (!On || _inside) return;
+        if (!_packLogged) { _packLogged = true; Plugin.L.LogInfo($"MOD: дух перекрашивает палитру (слот {slot})"); }
+        if (Shuffle)
+        {
+            if (slot <= 0 || slot >= _map.Length || _map[slot] == slot || Cfg == null) return;
+            bool cb = false;
+            _inside = true;
+            try { hue = Cfg.ResolveColor((eSectionFamily)_map[slot], cb); dark = Cfg.ResolveColorDark((eSectionFamily)_map[slot], cb); }
+            catch { }
+            finally { _inside = false; }
+        }
+        else { hue = Fade(hue); dark = Fade(dark); }
     }
 
     public static void Apply(LiquidLookConfig cfg, eSectionFamily family, bool colorBlind, bool dark, ref Color result)
@@ -82,6 +124,14 @@ public static class ColorCurse
 
 static class ColorCursePatches
 {
+    [HarmonyPrefix]
+    [HarmonyPatch(typeof(LiquidFamilyPalette), nameof(LiquidFamilyPalette.Upload))]
+    static void Upload_Pre(LiquidLookConfig config) { if (config != null) ColorCurse.Cfg = config; }
+
+    [HarmonyPrefix]
+    [HarmonyPatch(typeof(LiquidFamilyPalette), nameof(LiquidFamilyPalette.Pack))]
+    static void Pack_Pre(int slot, ref Color hue, ref Color dark) => ColorCurse.Pack(slot, ref hue, ref dark);
+
     [HarmonyPostfix]
     [HarmonyPatch(typeof(LiquidLookConfig), nameof(LiquidLookConfig.ResolveColor))]
     static void Color_Post(LiquidLookConfig __instance, eSectionFamily family, bool colorBlind, ref Color __result)

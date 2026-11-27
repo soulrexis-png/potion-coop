@@ -23,6 +23,7 @@
     <Reference Include="Il2CppInterop.Common"><HintPath>$(Core)\Il2CppInterop.Common.dll</HintPath><Private>false</Private></Reference>
 
     <Reference Include="Il2Cppmscorlib"><HintPath>$(Interop)\Il2Cppmscorlib.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Il2CppSystem.Core"><HintPath>$(Interop)\Il2CppSystem.Core.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine.CoreModule"><HintPath>$(Interop)\UnityEngine.CoreModule.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="R3"><HintPath>$(Interop)\R3.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="CodeBase"><HintPath>$(Interop)\CodeBase.dll</HintPath><Private>false</Private></Reference>
